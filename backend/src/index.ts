@@ -12,7 +12,10 @@ function parseEnvLine(line: string): [string, string] | null {
   const key = trimmed.slice(0, eq).trim();
   let val = trimmed.slice(eq + 1).trim();
 
-  if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+  if (
+    (val.startsWith('"') && val.endsWith('"')) ||
+    (val.startsWith("'") && val.endsWith("'"))
+  ) {
     val = val.slice(1, -1);
   }
 
@@ -55,7 +58,9 @@ function loadEnvFile(filePath: string, options?: { override?: boolean }) {
     const k = path.normalize(p);
     if (seen.has(k)) continue;
     seen.add(k);
-    const isPrimary = primaryCandidates.some((candidate) => path.normalize(candidate) === k);
+    const isPrimary = primaryCandidates.some(
+      (candidate) => path.normalize(candidate) === k,
+    );
     if (isPrimary && fs.existsSync(k)) {
       loadEnvFile(k, { override: true });
       primaryLoaded = true;
@@ -73,8 +78,13 @@ import "./engine/patchShortExhaustionNoSoftFinal.js";
 import Fastify from "fastify";
 import formbody from "@fastify/formbody";
 import cors from "@fastify/cors";
-import { registerHttpRoutes, requestOptimizerGracefulPauseAndFlush, setShutdownHandler } from "./api/http.js";
+import {
+  registerHttpRoutes,
+  requestOptimizerGracefulPauseAndFlush,
+  setShutdownHandler,
+} from "./api/http.js";
 import { createWsHub } from "./api/wsHub.js";
+import { createPrivatePositionsWs } from "./api/privatePositionsWs.js";
 import { runtime } from "./runtime/runtime.js";
 import { ServerLogStream } from "./logging/ServerLogStream.js";
 import { startTopOpenInterestUniverseScheduler } from "./runtime/topOpenInterestUniverse.js";
@@ -87,7 +97,9 @@ process.on("unhandledRejection", (reason) => {
     ts: Date.now(),
     source: "process",
     level: "error",
-    msg: `[process] unhandledRejection ${String((reason as any)?.stack ?? (reason as any)?.message ?? reason)}`,
+    msg: `[process] unhandledRejection ${String(
+      (reason as any)?.stack ?? (reason as any)?.message ?? reason,
+    )}`,
   });
 });
 
@@ -96,7 +108,9 @@ process.on("uncaughtExceptionMonitor", (error) => {
     ts: Date.now(),
     source: "process",
     level: "fatal",
-    msg: `[process] uncaughtException ${String(error?.stack ?? error?.message ?? error)}`,
+    msg: `[process] uncaughtException ${String(
+      error?.stack ?? error?.message ?? error,
+    )}`,
   });
 });
 
@@ -122,11 +136,12 @@ export async function buildApp() {
       return cb(null, ok);
     },
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type"]
+    allowedHeaders: ["Content-Type"],
   });
 
   registerHttpRoutes(app);
   createWsHub(app);
+  createPrivatePositionsWs(app);
 
   return app;
 }
@@ -136,7 +151,9 @@ async function main() {
   const host = process.env.HOST ?? "0.0.0.0";
 
   const app = await buildApp();
-  const stopTopOpenInterestUniverseScheduler = startTopOpenInterestUniverseScheduler(app.log);
+  const stopTopOpenInterestUniverseScheduler = startTopOpenInterestUniverseScheduler(
+    app.log,
+  );
   let shuttingDown = false;
   const gracefulShutdown = async (signal: string) => {
     if (shuttingDown) return;
@@ -146,7 +163,11 @@ async function main() {
       app.log.info({ signal }, "shutdown requested");
       stopTopOpenInterestUniverseScheduler();
       const st = runtime.getStatus();
-      if (st.sessionState === "RUNNING" || st.sessionState === "PAUSED" || st.sessionState === "STOPPING") {
+      if (
+        st.sessionState === "RUNNING" ||
+        st.sessionState === "PAUSED" ||
+        st.sessionState === "STOPPING"
+      ) {
         await runtime.stop(`graceful_shutdown:${signal}`);
       }
       await requestOptimizerGracefulPauseAndFlush({ timeoutMs: 3_000 });
@@ -169,7 +190,10 @@ async function main() {
 
   await app.listen({ port, host });
 
-  app.log.info({ host, port, bootSessionId: serverLogStream.bootSessionId }, "backend listening");
+  app.log.info(
+    { host, port, bootSessionId: serverLogStream.bootSessionId },
+    "backend listening",
+  );
 }
 
 main().catch((err) => {

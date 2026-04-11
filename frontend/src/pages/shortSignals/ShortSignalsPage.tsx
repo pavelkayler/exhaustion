@@ -3,7 +3,11 @@ import { Card, Col, Container, Form, Row, Table } from "react-bootstrap";
 import { HeaderBar } from "../dashboard/components/HeaderBar";
 import { useSessionRuntime } from "../../features/session/hooks/useSessionRuntime";
 import { useWsFeed } from "../../features/ws/hooks/useWsFeed";
-import type { LogEvent, ShortOiSpikeWatchlistRecord, SymbolRow } from "../../shared/types/domain";
+import type {
+  LogEvent,
+  ShortOiSpikeWatchlistRecord,
+  SymbolRow,
+} from "../../shared/types/domain";
 import { formatCompactNumber } from "./formatCompactNumber";
 
 const SHORT_SIGNAL_EVENT_TYPES = new Set([
@@ -50,38 +54,22 @@ function isActiveShortSignalRow(row: SymbolRow): boolean {
 function isRejectedShortEvent(event: LogEvent): boolean {
   const payload = event.payload as Record<string, unknown> | null | undefined;
   const snapshot = payload?.snapshot as Record<string, unknown> | null | undefined;
-  return isRejectedState(payload?.nextState)
-    || isRejectedState(payload?.state)
-    || isRejectedState(snapshot?.state);
+  return (
+    isRejectedState(payload?.nextState) ||
+    isRejectedState(payload?.state) ||
+    isRejectedState(snapshot?.state)
+  );
 }
 
 function eventSummary(event: LogEvent): string {
   const payload = event.payload as Record<string, unknown> | null | undefined;
-  return String(payload?.summaryReason ?? payload?.reason ?? payload?.transitionReason ?? "-");
+  return String(
+    payload?.summaryReason ?? payload?.reason ?? payload?.transitionReason ?? "-",
+  );
 }
 
 function buildCoinGlassUrl(symbol: string): string {
   return `https://www.coinglass.com/tv/Bybit_${encodeURIComponent(symbol)}`;
-}
-
-function BlockHeader(props: {
-  title: string;
-  checked: boolean;
-  onChange: (checked: boolean) => void;
-}) {
-  return (
-    <div className="d-flex align-items-center justify-content-between gap-3 flex-wrap">
-      <span>{props.title}</span>
-      <Form.Check
-        type="checkbox"
-        id={`hide-rejected-${props.title.replace(/\s+/g, "-").toLowerCase()}`}
-        label="hide rejected"
-        checked={props.checked}
-        onChange={(event) => props.onChange(event.currentTarget.checked)}
-        className="mb-0 user-select-none"
-      />
-    </div>
-  );
 }
 
 export function ShortSignalsPage() {
@@ -95,10 +83,9 @@ export function ShortSignalsPage() {
     eventStream,
     requestEventsTail,
   } = useWsFeed();
-  const { status, busy, start, stop, pause, resume, canStart, canStop, canPause, canResume } = useSessionRuntime();
-  const [recentSignalsHideRejected, setRecentSignalsHideRejected] = useState(false);
-  const [watchlistHideRejected, setWatchlistHideRejected] = useState(false);
-  const [recentEventsHideRejected, setRecentEventsHideRejected] = useState(false);
+  const { status, busy, start, stop, pause, resume, canStart, canStop, canPause, canResume } =
+    useSessionRuntime();
+  const [hideRejected, setHideRejected] = useState(false);
 
   useEffect(() => {
     requestEventsTail(100);
@@ -123,11 +110,14 @@ export function ShortSignalsPage() {
     () =>
       rows
         .filter(isActiveShortSignalRow)
-        .filter((row) => !recentSignalsHideRejected || !isRejectedState(row.shortSignalState))
+        .filter((row) => !hideRejected || !isRejectedState(row.shortSignalState))
         .slice()
-        .sort((left, right) => Number(right.updatedAt ?? 0) - Number(left.updatedAt ?? 0))
+        .sort(
+          (left, right) =>
+            Number(right.updatedAt ?? 0) - Number(left.updatedAt ?? 0),
+        )
         .slice(0, 10),
-    [recentSignalsHideRejected, rows],
+    [hideRejected, rows],
   );
 
   const filteredWatchlist = useMemo(() => {
@@ -146,28 +136,34 @@ export function ShortSignalsPage() {
         signalOrdinal: Number(signalEventCountBySymbol.get(row.symbol) ?? 0),
         coinglassUrl: buildCoinGlassUrl(row.symbol),
       }))
-      .filter((row) => !watchlistHideRejected || !isRejectedState(row.shortSignalState))
+      .filter((row) => !hideRejected || !isRejectedState(row.shortSignalState))
       .sort((left, right) => {
-        const delta = Math.abs(Number(right.oiMove5mPct ?? 0)) - Math.abs(Number(left.oiMove5mPct ?? 0));
+        const delta =
+          Math.abs(Number(right.oiMove5mPct ?? 0)) -
+          Math.abs(Number(left.oiMove5mPct ?? 0));
         if (delta !== 0) return delta;
         return left.symbol.localeCompare(right.symbol);
       })
       .slice(0, 10);
-  }, [rows, signalEventCountBySymbol, watchlistHideRejected]);
+  }, [hideRejected, rows, signalEventCountBySymbol]);
 
   const recentEvents = useMemo(
     () =>
       [...events, ...eventStream]
         .filter((event) => SHORT_SIGNAL_EVENT_TYPES.has(normalizeState(event.type)))
-        .filter((event) => !recentEventsHideRejected || !isRejectedShortEvent(event))
+        .filter((event) => !hideRejected || !isRejectedShortEvent(event))
         .sort((left, right) => Number(right.ts ?? 0) - Number(left.ts ?? 0))
-        .filter((event, index, arr) => arr.findIndex((candidate) =>
-          candidate.ts === event.ts
-          && candidate.type === event.type
-          && candidate.symbol === event.symbol
-        ) === index)
+        .filter(
+          (event, index, arr) =>
+            arr.findIndex(
+              (candidate) =>
+                candidate.ts === event.ts &&
+                candidate.type === event.type &&
+                candidate.symbol === event.symbol,
+            ) === index,
+        )
         .slice(0, 10),
-    [eventStream, events, recentEventsHideRejected],
+    [eventStream, events, hideRejected],
   );
 
   return (
@@ -190,18 +186,30 @@ export function ShortSignalsPage() {
         onResume={() => void resume()}
       />
       <Container fluid className="py-3 px-2">
+        <Card className="genesis-card mb-3">
+          <Card.Body className="py-2 px-3 d-flex align-items-center justify-content-end">
+            <Form.Check
+              type="checkbox"
+              id="short-signals-hide-rejected-global"
+              label="hide rejected"
+              checked={hideRejected}
+              onChange={(event) => setHideRejected(event.currentTarget.checked)}
+              className="mb-0 user-select-none"
+            />
+          </Card.Body>
+        </Card>
+
         <Row className="g-3">
           <Col xl={6}>
             <Card className="genesis-card h-100">
-              <Card.Header>
-                <BlockHeader
-                  title="Recent Signals"
-                  checked={recentSignalsHideRejected}
-                  onChange={setRecentSignalsHideRejected}
-                />
-              </Card.Header>
+              <Card.Header>Recent Signals</Card.Header>
               <Card.Body className="p-0">
-                <Table responsive hover className="mb-0" style={{ tableLayout: "fixed", fontSize: TABLE_FONT_SIZE }}>
+                <Table
+                  responsive
+                  hover
+                  className="mb-0"
+                  style={{ tableLayout: "fixed", fontSize: TABLE_FONT_SIZE }}
+                >
                   <colgroup>
                     <col style={{ width: "120px" }} />
                     <col style={{ width: "130px" }} />
@@ -230,7 +238,9 @@ export function ShortSignalsPage() {
                     ))}
                     {recentSignals.length === 0 ? (
                       <tr>
-                        <td colSpan={5} className="text-center text-secondary py-4">No recent short signals.</td>
+                        <td colSpan={5} className="text-center text-secondary py-4">
+                          No recent short signals.
+                        </td>
                       </tr>
                     ) : null}
                   </tbody>
@@ -238,17 +248,17 @@ export function ShortSignalsPage() {
               </Card.Body>
             </Card>
           </Col>
+
           <Col xl={6}>
             <Card className="genesis-card h-100">
-              <Card.Header>
-                <BlockHeader
-                  title="Top OI Watchlist"
-                  checked={watchlistHideRejected}
-                  onChange={setWatchlistHideRejected}
-                />
-              </Card.Header>
+              <Card.Header>Top OI Watchlist</Card.Header>
               <Card.Body className="p-0">
-                <Table responsive hover className="mb-0" style={{ tableLayout: "fixed", fontSize: TABLE_FONT_SIZE }}>
+                <Table
+                  responsive
+                  hover
+                  className="mb-0"
+                  style={{ tableLayout: "fixed", fontSize: TABLE_FONT_SIZE }}
+                >
                   <colgroup>
                     <col style={{ width: "190px" }} />
                     <col style={{ width: "160px" }} />
@@ -277,7 +287,9 @@ export function ShortSignalsPage() {
                     ))}
                     {filteredWatchlist.length === 0 ? (
                       <tr>
-                        <td colSpan={5} className="text-center text-secondary py-4">No OI watchlist data.</td>
+                        <td colSpan={5} className="text-center text-secondary py-4">
+                          No OI watchlist data.
+                        </td>
                       </tr>
                     ) : null}
                   </tbody>
@@ -285,17 +297,17 @@ export function ShortSignalsPage() {
               </Card.Body>
             </Card>
           </Col>
+
           <Col xs={12}>
             <Card className="genesis-card">
-              <Card.Header>
-                <BlockHeader
-                  title="Recent Signal Events"
-                  checked={recentEventsHideRejected}
-                  onChange={setRecentEventsHideRejected}
-                />
-              </Card.Header>
+              <Card.Header>Recent Signal Events</Card.Header>
               <Card.Body className="p-0">
-                <Table responsive hover className="mb-0" style={{ tableLayout: "fixed", fontSize: TABLE_FONT_SIZE }}>
+                <Table
+                  responsive
+                  hover
+                  className="mb-0"
+                  style={{ tableLayout: "fixed", fontSize: TABLE_FONT_SIZE }}
+                >
                   <colgroup>
                     <col style={{ width: "130px" }} />
                     <col style={{ width: "120px" }} />
@@ -312,7 +324,11 @@ export function ShortSignalsPage() {
                   </thead>
                   <tbody>
                     {recentEvents.map((event, index) => (
-                      <tr key={`${String(event.ts ?? "0")}:${String(event.type ?? "unknown")}:${String(event.symbol ?? "")}:${index}`}>
+                      <tr
+                        key={`${String(event.ts ?? "0")}:${String(
+                          event.type ?? "unknown",
+                        )}:${String(event.symbol ?? "")}:${index}`}
+                      >
                         <td>{formatTime(finite(event.ts))}</td>
                         <td>{String(event.symbol ?? "-")}</td>
                         <td>{String(event.type ?? "-")}</td>
@@ -321,7 +337,9 @@ export function ShortSignalsPage() {
                     ))}
                     {recentEvents.length === 0 ? (
                       <tr>
-                        <td colSpan={4} className="text-center text-secondary py-4">No recent signal events.</td>
+                        <td colSpan={4} className="text-center text-secondary py-4">
+                          No recent signal events.
+                        </td>
                       </tr>
                     ) : null}
                   </tbody>

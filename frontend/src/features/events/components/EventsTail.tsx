@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Badge, Button, Card, Form, Table } from "react-bootstrap";
 import { getApiBase } from "../../../shared/config/env";
 import { fmtTime } from "../../../shared/utils/format";
@@ -27,6 +27,11 @@ function eventRowKey(event: LogEvent): string {
 
 export function EventsTail({ enabled, events, onRequestTail }: Props) {
   const [limit, setLimit] = useState(5);
+
+  useEffect(() => {
+    if (!enabled) return;
+    onRequestTail(5);
+  }, [enabled, onRequestTail]);
 
   const downloadUrl = useMemo(() => {
     const base = getApiBase();
@@ -61,11 +66,12 @@ export function EventsTail({ enabled, events, onRequestTail }: Props) {
           <Button
             size="sm"
             variant="outline-secondary"
-            onClick={() => window.open(downloadUrl, "_blank", "noopener,noreferrer")}
+            onClick={() =>
+              window.open(downloadUrl, "_blank", "noopener,noreferrer")
+            }
           >
             Download jsonl
           </Button>
-
         </div>
       </Card.Header>
 
@@ -73,7 +79,13 @@ export function EventsTail({ enabled, events, onRequestTail }: Props) {
         {!events.length ? (
           <div style={{ opacity: 0.75 }}>No events.</div>
         ) : (
-          <Table striped bordered hover size="sm" style={{ tableLayout: "fixed", width: "100%" }}>
+          <Table
+            striped
+            bordered
+            hover
+            size="sm"
+            style={{ tableLayout: "fixed", width: "100%" }}
+          >
             <thead>
               <tr>
                 <th style={{ width: "16%", fontSize: 12 }}>Time</th>
@@ -85,16 +97,44 @@ export function EventsTail({ enabled, events, onRequestTail }: Props) {
             <tbody>
               {events.map((ev) => (
                 <tr key={eventRowKey(ev)}>
-                  <td style={{ fontSize: 12, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  <td
+                    style={{
+                      fontSize: 12,
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                    }}
+                  >
                     {ev.ts ? fmtTime(ev.ts) : "—"}
                   </td>
-                  <td style={{ fontSize: 12, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  <td
+                    style={{
+                      fontSize: 12,
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                    }}
+                  >
                     {ev.type ?? "—"}
                   </td>
-                  <td style={{ fontSize: 12, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  <td
+                    style={{
+                      fontSize: 12,
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                    }}
+                  >
                     {ev.symbol ?? "—"}
                   </td>
-                  <td style={{ fontSize: 12, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  <td
+                    style={{
+                      fontSize: 12,
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                    }}
+                  >
                     {safeStr(ev.payload)}
                   </td>
                 </tr>
