@@ -1,7 +1,8 @@
 import { createHmac } from "node:crypto";
 import type { IncomingMessage } from "node:http";
+import type { Socket } from "node:net";
 import type { FastifyInstance, FastifyBaseLogger } from "fastify";
-import { WebSocketServer, type WebSocket } from "ws";
+import { WebSocketServer, WebSocket, type RawData } from "ws";
 
 type ExecutionMode = "demo" | "real";
 
@@ -55,6 +56,15 @@ function readModeFromRequest(request: IncomingMessage): ExecutionMode {
   }
 }
 
+function readPathnameFromRequest(request: IncomingMessage): string {
+  try {
+    const url = new URL(request.url ?? POSITIONS_WS_PATH, "http://localhost");
+    return url.pathname;
+  } catch {
+    return "";
+  }
+}
+
 function readNumber(value: unknown): number | null {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : null;
@@ -96,7 +106,7 @@ function normalizePositionRow(row: Record<string, unknown>): ExecutionPositionRo
 
 function safeSend(ws: WebSocket, body: ServerMessage): void {
   try {
-    if (ws.readyState === ws.OPEN) {
+    if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(body));
     }
   } catch {
@@ -201,7 +211,7 @@ class BybitPrivatePositionsStream {
       if (this.pingTimer) clearInterval(this.pingTimer);
       this.pingTimer = setInterval(() => {
         try {
-          if (socket.readyState === socket.OPEN) {
+          if (socket.readyState === WebSocket.OPEN) {
             socket.send(JSON.stringify({ op: "ping" }));
           }
         } catch {
@@ -210,7 +220,7 @@ class BybitPrivatePositionsStream {
       }, PRIVATE_WS_PING_INTERVAL_MS);
     });
 
-    socket.on("message", (buffer) => {
+    socket.on("message", (buffer: RawData) => {
       if (this.ws !== socket) return;
       const raw = typeof buffer === "string" ? buffer : buffer.toString("utf8");
 
@@ -336,6 +346,9 @@ export function createPrivatePositionsWs(app: FastifyInstance) {
 
   let wss: WebSocketServer | null = null;
   let broadcastTimer: NodeJS.Timeout | null = null;
+  let upgradeHandler:
+    | ((request: IncomingMessage, socket: Socket, head: Buffer) => void)
+    | null = null;
 
   function broadcastSnapshots() {
     for (const [client, mode] of clients.entries()) {
@@ -347,10 +360,20 @@ export function createPrivatePositionsWs(app: FastifyInstance) {
   }
 
   app.addHook("onReady", async () => {
-    wss = new WebSocketServer({
-      server: app.server,
-      path: POSITIONS_WS_PATH,
-    });
+    wss = new WebSocketServer({ noServer: true });
+
+    upgradeHandler = (request: IncomingMessage, socket: Socket, head: Buffer) => {
+      if (readPathnameFromRequest(request) !== POSITIONS_WS_PATH) return;
+      if (!wss) {
+        socket.destroy();
+        return;
+      }
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        wss!.emit("connection", ws, request);
+      });
+    };
+
+    app.server.on("upgrade", upgradeHandler);
 
     broadcastTimer = setInterval(() => {
       broadcastSnapshots();
@@ -384,6 +407,12 @@ export function createPrivatePositionsWs(app: FastifyInstance) {
 
     realStream.stop();
     demoStream.stop();
+    clients.clear();
+
+    if (upgradeHandler) {
+      app.server.off("upgrade", upgradeHandler);
+      upgradeHandler = null;
+    }
 
     if (wss) {
       await new Promise<void>((resolve) => wss!.close(() => resolve()));
