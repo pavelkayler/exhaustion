@@ -1,6 +1,8 @@
 import { createHmac } from "node:crypto";
 import type { FastifyBaseLogger } from "fastify";
 import { WebSocketServer, WebSocket, type RawData } from "ws";
+import { BybitDemoRestClient } from "../bybit/BybitDemoRestClient.js";
+import { BybitRealRestClient } from "../bybit/BybitRealRestClient.js";
 
 type ExecutionMode = "demo" | "real";
 type ExecutionPositionReason = "manual" | "candidate" | "final";
@@ -42,6 +44,14 @@ type ServerMessage =
   | { type: "positions_snapshot"; payload: PositionsSnapshot }
   | { type: "error"; message: string };
 
+type PositionsSeedClient = {
+  hasCredentials(): boolean;
+  getPositionsLinear(params?: {
+    symbol?: string;
+    settleCoin?: string;
+  }): Promise<{ list: Array<Record<string, unknown>> }>;
+};
+
 const POSITIONS_WS_PATH = "/ws/private-positions";
 const PRIVATE_WS_PING_INTERVAL_MS = 20_000;
 const CLIENT_BROADCAST_INTERVAL_MS = 1_000;
@@ -69,7 +79,9 @@ function inferPositionReason(row: Record<string, unknown>): ExecutionPositionRea
     return directReason;
   }
 
-  const orderLinkId = String(row.orderLinkId ?? row.positionLinkId ?? "").trim().toLowerCase();
+  const orderLinkId = String(row.orderLinkId ?? row.positionLinkId ?? "")
+    .trim()
+    .toLowerCase();
   if (orderLinkId.includes("candidate")) return "candidate";
   if (orderLinkId.includes("final")) return "final";
 
@@ -104,7 +116,7 @@ function normalizePositionRow(
     tp: readPositiveNumber(row.takeProfit),
     sl: readPositiveNumber(row.stopLoss),
     side,
-    size: readPositiveNumber(row.size),
+    size,
     entryPrice: readPositiveNumber(row.avgPrice),
     markPrice: readPositiveNumber(row.markPrice),
     updatedAt: readNumber(row.updatedTime) ?? Date.now(),
@@ -131,6 +143,7 @@ class BybitPrivatePositionsStream {
   private updatedAt: number | null = null;
   private error: string | null = null;
   private positions = new Map<string, ExecutionPositionRow>();
+  private seedInFlight = false;
 
   constructor(
     private readonly mode: ExecutionMode,
@@ -138,6 +151,7 @@ class BybitPrivatePositionsStream {
     private readonly wsUrl: string,
     private readonly apiKey: string,
     private readonly apiSecret: string,
+    private readonly seedClient: PositionsSeedClient | null,
   ) {
     this.status = this.hasCredentials() ? "connecting" : "missing_credentials";
   }
@@ -168,6 +182,7 @@ class BybitPrivatePositionsStream {
     }
     if (this.shouldRun) return;
     this.shouldRun = true;
+    void this.seedFromRest("ensure_started");
     this.connect();
   }
 
@@ -183,6 +198,50 @@ class BybitPrivatePositionsStream {
       return;
     } finally {
       this.ws = null;
+    }
+  }
+
+  private async seedFromRest(reason: string): Promise<void> {
+    if (!this.shouldRun) return;
+    if (!this.seedClient || !this.seedClient.hasCredentials()) return;
+    if (this.seedInFlight) return;
+
+    this.seedInFlight = true;
+    try {
+      const response = await this.seedClient.getPositionsLinear({ settleCoin: "USDT" });
+      const rows = Array.isArray(response?.list) ? response.list : [];
+
+      const next = new Map<string, ExecutionPositionRow>();
+      for (const item of rows) {
+        if (!item || typeof item !== "object") continue;
+        const normalized = normalizePositionRow(item);
+        if (!normalized) continue;
+        next.set(normalized.key, normalized);
+      }
+
+      this.positions = next;
+      this.updatedAt = Date.now();
+      this.error = null;
+
+      this.logger.info(
+        {
+          mode: this.mode,
+          reason,
+          rows: next.size,
+        },
+        "private positions seed synced",
+      );
+    } catch (error) {
+      this.logger.warn(
+        {
+          mode: this.mode,
+          reason,
+          error: String((error as Error)?.message ?? error),
+        },
+        "private positions seed failed",
+      );
+    } finally {
+      this.seedInFlight = false;
     }
   }
 
@@ -255,6 +314,7 @@ class BybitPrivatePositionsStream {
           if (msg.success === true) {
             this.status = "connected";
             this.error = null;
+            void this.seedFromRest("subscribe_ok");
             return;
           }
 
@@ -337,12 +397,17 @@ export function createPrivatePositionsWs(app: {
   log: FastifyBaseLogger;
 }) {
   const clients = new Map<WebSocket, ExecutionMode>();
+
+  const realSeedClient = new BybitRealRestClient();
+  const demoSeedClient = new BybitDemoRestClient();
+
   const realStream = new BybitPrivatePositionsStream(
     "real",
     app.log,
     process.env.BYBIT_PRIVATE_WS_URL ?? "wss://stream.bybit.com/v5/private",
     process.env.BYBIT_API_KEY ?? "",
     process.env.BYBIT_API_SECRET ?? "",
+    realSeedClient,
   );
   const demoStream = new BybitPrivatePositionsStream(
     "demo",
@@ -350,6 +415,7 @@ export function createPrivatePositionsWs(app: {
     process.env.BYBIT_DEMO_PRIVATE_WS_URL ?? "wss://stream-demo.bybit.com/v5/private",
     process.env.BYBIT_DEMO_API_KEY ?? "",
     process.env.BYBIT_DEMO_API_SECRET ?? "",
+    demoSeedClient,
   );
 
   const getStream = (mode: ExecutionMode) =>
@@ -374,7 +440,7 @@ export function createPrivatePositionsWs(app: {
     wss = new WebSocketServer({
       host,
       port,
-      path: "/ws/private-positions",
+      path: POSITIONS_WS_PATH,
     });
 
     broadcastTimer = setInterval(() => {
@@ -384,7 +450,7 @@ export function createPrivatePositionsWs(app: {
     wss.on("connection", (ws, request) => {
       const mode = (() => {
         try {
-          const url = new URL(request.url ?? "/ws/private-positions", "http://localhost");
+          const url = new URL(request.url ?? POSITIONS_WS_PATH, "http://localhost");
           return normalizeMode(url.searchParams.get("mode"));
         } catch {
           return "demo";
@@ -409,7 +475,7 @@ export function createPrivatePositionsWs(app: {
     });
 
     app.log.info(
-      { host, port, path: "/ws/private-positions" },
+      { host, port, path: POSITIONS_WS_PATH },
       "private positions ws ready",
     );
   });
