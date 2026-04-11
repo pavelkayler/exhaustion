@@ -1,0 +1,308 @@
+# Repository cleanup report
+
+## Summary
+- original files: 394
+- cleaned files: 134
+- removed files: 262
+- added files: 2
+- remaining frontend source files: 37
+- remaining backend source files: 69
+
+## Cleanup rules applied
+- kept only frontend source files reachable from `frontend/src/main.tsx`
+- kept only backend source files reachable from `backend/src/index.ts`
+- removed legacy pages, legacy feature folders, test files, and stale helper scripts
+- replaced the old multi-era docs set with a minimal current-scope docs folder
+- replaced the oversized shared frontend type hub with a compact active-scope `domain.ts`
+
+## Active frontend routes
+- `/`
+- `/signals`
+- `/execution`
+
+## Backend HTTP routes kept
+- `GET /health`
+- `POST /api/admin/shutdown`
+- `GET /api/session/status`
+- `POST /api/session/start`
+- `POST /api/session/stop`
+- `POST /api/session/pause`
+- `POST /api/session/resume`
+- `GET /api/process/status`
+- `GET /api/config`
+- `POST /api/config`
+- `POST /api/manual-test-order`
+- `GET /api/session/events/download`
+
+## Validation
+- every remaining frontend source file is reachable from `frontend/src/main.tsx`
+- every remaining backend source file is reachable from `backend/src/index.ts`
+- no unresolved relative imports remain in the cleaned tree
+
+## Removed backend source files
+- `backend/src/analytics/shortSignalMinuteBarStore.ts`
+- `backend/src/analytics/shortSignalOutcomeRules.ts`
+- `backend/src/analytics/shortSignalOutcomeStore.ts`
+- `backend/src/api/dto.ts`
+- `backend/src/bybit/rest.ts`
+- `backend/src/bybit/topicBuilder.ts`
+- `backend/src/coinglass/CoinGlassClient.ts`
+- `backend/src/dataset/receiveDataStore.ts`
+- `backend/src/dataset/timestampMerge.ts`
+- `backend/src/engine/MarketStateStore.ts`
+- `backend/src/engine/SessionManager.ts`
+- `backend/src/engine/SignalEngine.ts`
+- `backend/src/engine/StrategyEngine.ts`
+- `backend/src/paper/fees.ts`
+- `backend/src/paper/funding.ts`
+- `backend/src/paper/models.ts`
+- `backend/src/paper/rounding.ts`
+- `backend/src/recorder/minuteCoverage.ts`
+- `backend/src/shortResearch/api/registerShortSignalWatchlistRoutes.ts`
+- `backend/src/shortResearch/api/registerShortSignalsDashboardWs.ts`
+- `backend/src/shortResearch/storage/ShortResearchStorage.ts`
+
+## Removed frontend source files
+- `frontend/src/app/App.test.ts`
+- `frontend/src/assets/react.svg`
+- `frontend/src/features/dataReceive/api/dataReceiveApi.ts`
+- `frontend/src/features/datasetHistory/api/datasetHistoryApi.ts`
+- `frontend/src/features/datasetHistory/ui/DatasetManagementPanel.tsx`
+- `frontend/src/features/datasetTarget/api/datasetTargetApi.ts`
+- `frontend/src/features/datasetTarget/ui/DatasetTargetCard.tsx`
+- `frontend/src/features/datasetTarget/ui/receiveProgress.test.ts`
+- `frontend/src/features/datasetTarget/ui/receiveProgress.ts`
+- `frontend/src/features/events/api/eventsApi.ts`
+- `frontend/src/features/market/components/LiveRowsTable.tsx`
+- `frontend/src/features/optimizer/api/optimizerApi.test.ts`
+- `frontend/src/features/optimizer/api/optimizerApi.ts`
+- `frontend/src/features/optimizer/utils/datasetWindow.test.ts`
+- `frontend/src/features/optimizer/utils/datasetWindow.ts`
+- `frontend/src/features/optimizer/utils/historyPayload.test.ts`
+- `frontend/src/features/optimizer/utils/historyPayload.ts`
+- `frontend/src/features/optimizer/utils/inputValidation.test.ts`
+- `frontend/src/features/optimizer/utils/inputValidation.ts`
+- `frontend/src/features/optimizer/utils/storageScope.test.ts`
+- `frontend/src/features/optimizer/utils/storageScope.ts`
+- `frontend/src/features/optimizer/utils/timeframes.test.ts`
+- `frontend/src/features/optimizer/utils/timeframes.ts`
+- `frontend/src/features/raw/components/RawWsMessage.tsx`
+- `frontend/src/features/recorder/api/recorderApi.ts`
+- `frontend/src/features/session/api/recorderApi.ts`
+- `frontend/src/features/session/components/ProcessIndicatorsBar.test.ts`
+- `frontend/src/features/session/components/ProcessIndicatorsBar.tsx`
+- `frontend/src/features/session/hooks/useProcessStatus.ts`
+- `frontend/src/features/shortExecution/api/shortExecution.ts`
+- `frontend/src/features/shortExecution/api/shortExecutionV2.ts`
+- `frontend/src/features/shortExecutionOptimizer/api/shortExecutionOptimizer.ts`
+- `frontend/src/features/shortExecutionOptimizer/components/ShortExecutionOptimizerControlsCard.tsx`
+- `frontend/src/features/shortExecutionOptimizer/components/ShortExecutionOptimizerDetailCard.tsx`
+- `frontend/src/features/shortExecutionOptimizer/components/ShortExecutionOptimizerResultsTable.tsx`
+- `frontend/src/features/shortExecutionOptimizer/components/ShortExecutionOptimizerRunsTable.tsx`
+- `frontend/src/features/shortReplay/api/shortReplay.ts`
+- `frontend/src/features/shortReplay/api/shortValidation.ts`
+- `frontend/src/features/shortReplay/components/ShortReplayControlsCard.tsx`
+- `frontend/src/features/shortReplay/components/ShortReplayDetailCard.tsx`
+- `frontend/src/features/shortReplay/components/ShortReplayRunsTable.tsx`
+- `frontend/src/features/shortReplay/components/ShortReplaySetupDetailCard.tsx`
+- `frontend/src/features/shortReplay/components/ShortReplaySetupsTable.tsx`
+- `frontend/src/features/shortReplay/components/ShortReplaySignalsTable.tsx`
+- `frontend/src/features/shortReplay/components/ShortReplayValidationCasesTable.tsx`
+- `frontend/src/features/shortReplay/components/ShortReplayValidationDetailCard.tsx`
+- `frontend/src/features/shortSetupOptimizer/api/shortSetupOptimizer.ts`
+- `frontend/src/features/shortSetupOptimizer/components/ShortSetupOptimizerControlsCard.tsx`
+- `frontend/src/features/shortSetupOptimizer/components/ShortSetupOptimizerDetailCard.tsx`
+- `frontend/src/features/shortSetupOptimizer/components/ShortSetupOptimizerResultsTable.tsx`
+- `frontend/src/features/shortSetupOptimizer/components/ShortSetupOptimizerRunsTable.tsx`
+- `frontend/src/features/shortSignals/api/shortLiveSetups.ts`
+- `frontend/src/features/shortSignals/api/shortOiWatchlist.ts`
+- `frontend/src/features/shortSignals/api/shortSignalCalibration.ts`
+- `frontend/src/features/shortSignals/api/shortSignalOutcomes.ts`
+- `frontend/src/features/shortSignals/components/ShortLiveSetupDetailCard.tsx`
+- `frontend/src/features/shortSignals/components/ShortLiveSetupsTable.tsx`
+- `frontend/src/features/shortSignals/components/ShortSignalCalibrationCard.tsx`
+- `frontend/src/features/shortSignals/components/ShortSignalEventsTable.tsx`
+- `frontend/src/features/shortSignals/components/ShortSignalOutcomeDetailCard.tsx`
+- `frontend/src/features/shortSignals/components/ShortSignalOutcomeFiltersBar.tsx`
+- `frontend/src/features/shortSignals/components/ShortSignalOutcomeTable.tsx`
+- `frontend/src/features/shortSignals/components/ShortSignalRowsTable.tsx`
+- `frontend/src/features/shortSignals/components/ShortSignalSnapshotCard.tsx`
+- `frontend/src/features/shortSignals/components/ShortSignalStageBadge.tsx`
+- `frontend/src/features/shortSignals/components/ShortSignalsSummaryCards.tsx`
+- `frontend/src/features/shortSignals/hooks/useRecentShortSignalEvents.ts`
+- `frontend/src/features/shortSignals/utils/shortSignalOutcomes.ts`
+- `frontend/src/features/shortSignals/utils/shortSignals.test.ts`
+- `frontend/src/features/shortSignals/utils/shortSignals.ts`
+- `frontend/src/features/stats/api/tradeStatsApi.ts`
+- `frontend/src/features/stats/components/TradeExcursionsTable.tsx`
+- `frontend/src/features/stats/components/TradeStatsBySymbolTable.tsx`
+- `frontend/src/features/stats/components/TradeStatsTabs.tsx`
+- `frontend/src/features/stats/hooks/useTradeStatsBySymbol.ts`
+- `frontend/src/features/summary/api/summaryApi.ts`
+- `frontend/src/features/summary/components/SessionSummaryPanel.tsx`
+- `frontend/src/features/summary/components/SummaryCard.tsx`
+- `frontend/src/features/summary/components/TradesTable.tsx`
+- `frontend/src/features/summary/hooks/useSessionSummary.ts`
+- `frontend/src/features/summary/types.ts`
+- `frontend/src/features/universe/api.ts`
+- `frontend/src/features/universe/types.ts`
+- `frontend/src/features/ws/utils/eventDedupe.test.ts`
+- `frontend/src/features/ws/utils/wsBackoff.test.ts`
+- `frontend/src/pages/dashboard/components/SessionMetaBar.tsx`
+- `frontend/src/pages/dashboard/components/sections/DashboardLiveRowsSection.tsx`
+- `frontend/src/pages/dashboard/components/sections/DashboardTradeStatsSection.tsx`
+- `frontend/src/pages/shortExecution/components/sections/ShortExecutionContentSection.tsx`
+- `frontend/src/pages/shortExecution/components/sections/ShortExecutionHeaderSection.tsx`
+- `frontend/src/pages/shortExecution/components/sections/ShortExecutionReadinessSection.tsx`
+- `frontend/src/pages/shortExecution/components/sections/ShortExecutionValidationSection.tsx`
+- `frontend/src/pages/shortExecution/context/ShortExecutionPageContext.tsx`
+- `frontend/src/pages/shortExecutionAnalytics/ShortExecutionAnalyticsPage.tsx`
+- `frontend/src/pages/shortExecutionAnalytics/ShortExecutionPresetComparePage.tsx`
+- `frontend/src/pages/shortExecutionAnalytics/analyticsRefreshBus.ts`
+- `frontend/src/pages/shortExecutionAnalytics/components/ShortExecutionAnalyticsContent.tsx`
+- `frontend/src/pages/shortExecutionAnalytics/components/ShortExecutionAnalyticsWorkbenchV2.tsx`
+- `frontend/src/pages/shortExecutionJournal/ShortExecutionJournalPage.tsx`
+- `frontend/src/pages/shortExecutionJournal/components/ShortExecutionJournalContent.tsx`
+- `frontend/src/pages/shortExecutionJournal/components/ShortExecutionJournalContentV2.tsx`
+- `frontend/src/pages/shortExecutionOptimizer/ShortExecutionOptimizerPage.tsx`
+- `frontend/src/pages/shortExecutionOptimizer/components/sections/ShortExecutionOptimizerContentSection.tsx`
+- `frontend/src/pages/shortExecutionOptimizer/components/sections/ShortExecutionOptimizerHeaderSection.tsx`
+- `frontend/src/pages/shortExecutionOptimizer/context/ShortExecutionOptimizerPageContext.tsx`
+- `frontend/src/pages/shortExecutionPresets/ShortExecutionPresetsPage.tsx`
+- `frontend/src/pages/shortExecutionPresets/components/ShortExecutionPresetsContent.tsx`
+- `frontend/src/pages/shortReplay/ShortReplayPage.tsx`
+- `frontend/src/pages/shortReplay/components/sections/ShortReplayContentSection.tsx`
+- `frontend/src/pages/shortReplay/components/sections/ShortReplayHeaderSection.tsx`
+- `frontend/src/pages/shortReplay/components/sections/ShortReplayOverviewSection.tsx`
+- `frontend/src/pages/shortReplay/components/sections/ShortReplaySetupsSection.tsx`
+- `frontend/src/pages/shortReplay/components/sections/ShortReplaySignalsSection.tsx`
+- `frontend/src/pages/shortReplay/components/sections/ShortReplayValidationSection.tsx`
+- `frontend/src/pages/shortReplay/context/ShortReplayPageContext.tsx`
+- `frontend/src/pages/shortSignals/components/sections/ShortSignalsContentSection.tsx`
+- `frontend/src/pages/shortSignals/components/sections/ShortSignalsEventsSection.tsx`
+- `frontend/src/pages/shortSignals/components/sections/ShortSignalsHeaderSection.tsx`
+- `frontend/src/pages/shortSignals/components/sections/ShortSignalsMonitorSection.tsx`
+- `frontend/src/pages/shortSignals/components/sections/ShortSignalsOiSpikesSection.tsx`
+- `frontend/src/pages/shortSignals/components/sections/ShortSignalsOverviewSection.tsx`
+- `frontend/src/pages/shortSignals/components/sections/ShortSignalsRecentSignalsSection.tsx`
+- `frontend/src/pages/shortSignals/components/sections/ShortSignalsReviewSection.tsx`
+- `frontend/src/pages/shortSignals/components/sections/ShortSignalsSetupsSection.tsx`
+- `frontend/src/pages/shortSignals/context/ShortSignalsPageContext.tsx`
+- `frontend/src/pages/shortSignals/formatCompactNumber.test.ts`
+- `frontend/src/pages/universe/UniversePage.tsx`
+- `frontend/src/pages/universe/components/sections/UniverseAvailableSection.tsx`
+- `frontend/src/pages/universe/components/sections/UniverseBuilderSection.tsx`
+- `frontend/src/pages/universe/components/sections/UniverseContentSection.tsx`
+- `frontend/src/pages/universe/components/sections/UniverseHeaderSection.tsx`
+- `frontend/src/pages/universe/components/sections/UniverseSavedSection.tsx`
+- `frontend/src/pages/universe/components/sections/UniverseTabsSection.tsx`
+- `frontend/src/pages/universe/context/UniversePageContext.tsx`
+- `frontend/src/shared/components/CopyButton.tsx`
+- `frontend/src/shared/components/StatusPill.tsx`
+- `frontend/src/shared/hooks/useBusySyncPhase.ts`
+- `frontend/src/shared/ui/BlockSyncStatusBadge.tsx`
+- `frontend/src/shared/ui/CenteredProgressBar.tsx`
+- `frontend/src/shared/ui/TablePaginationControls.tsx`
+
+## Removed docs and top-level clutter
+- `.idea/.gitignore`
+- `.idea/bots_dev.iml`
+- `.idea/modules.xml`
+- `.idea/vcs.xml`
+- `dev_process_helpers.sh`
+- `docs/00_handoff_readme.md`
+- `docs/01_requirements.md`
+- `docs/02_bybit_interfaces.md`
+- `docs/03_strategy_logic.md`
+- `docs/04_paper_execution.md`
+- `docs/05_state_machines.md`
+- `docs/06_contracts.md`
+- `docs/07_eventlog.md`
+- `docs/08_roadmap.md`
+- `docs/09_project_structure.md`
+- `docs/10_json_schemas.md`
+- `docs/11_current_state.md`
+- `docs/12_live_rows.md`
+- `docs/13_presets.md`
+- `docs/14_direction_mode.md`
+- `docs/15_apply_and_reboot.md`
+- `docs/16_summary_ui.md`
+- `docs/17_optimizer.md`
+- `docs/18_stability.md`
+- `docs/19_short_execution_optimizer_report_2026-03-25.md`
+- `docs/20_future_plan.md`
+- `docs/21_exhaustion_bot_technical_spec.md`
+- `docs/22_project_handover.md`
+- `docs/23_assistant_workflow.md`
+- `docs/24_strict_setup_native_transition.md`
+- `docs/25_stage_01_report.md`
+- `docs/26_stage_02_report.md`
+- `docs/27_stage_03_report.md`
+- `docs/28_stage_04_report.md`
+- `docs/29_stage_05_report.md`
+- `docs/30_stage_06_report.md`
+- `docs/31_stage_07_report.md`
+- `docs/32_stage_08_report.md`
+- `docs/33_stage_09_report.md`
+- `docs/34_stage_10_report.md`
+- `docs/35_ci_build_and_runtime_fix_report.md`
+- `docs/35_real_mode_operator_control.md`
+- `docs/36_intake_source_and_broker_sync_fix.md`
+- `docs/36_short_signals_front_signal_packaging.md`
+- `docs/36_signal_execution_rollback.md`
+- `docs/37_execution_antistall_and_windows_fix.md`
+- `docs/37_short_execution_bundle_visibility_and_preflight_clarity.md`
+- `docs/38_grid_leg_margin_allocation_fix.md`
+- `docs/38_short_execution_broker_timeout_hotfix.md`
+- `docs/38_short_execution_tpsl_sync_throttle.md`
+- `docs/39_short_execution_broker_sync_transition_logging.md`
+- `docs/39_short_execution_optimizer_parallel_confirmed.md`
+- `docs/39_strict_grid_margin_and_all_or_none.md`
+- `docs/40_short_execution_bundle_acceptsignal_signature_fix.md`
+- `docs/40_short_execution_nonfatal_timeout_fix.md`
+- `docs/40_short_execution_optimizer_symbol_scope_stage1.md`
+- `docs/40_short_execution_optimizer_worker_fix.md`
+- `docs/40_user_position_margin_grid_fix.md`
+- `docs/41_execution_tp_sl_from_actual_fill.md`
+- `docs/41_short_execution_optimizer_symbol_selector_and_scope_fix.md`
+- `docs/41_short_execution_protection_restore_and_session_chunk_logs.md`
+- `docs/42_refresh_start_existing_position_tpsl_resync.md`
+- `docs/42_short_execution_optimizer_bybit_backfill_stage2.md`
+- `docs/42_short_signals_recent_events_server_feed.md`
+- `docs/43_short_execution_optimizer_symbols_hotfix.md`
+- `docs/44_short_execution_optimizer_worker_merge_stack_fix.md`
+- `docs/45_short_execution_optimizer_top_results_cap.md`
+- `docs/46_short_signal_events_coinglass_tv_link.md`
+- `docs/47_short_execution_preset_scope_visibility_and_coinglass_tv_snapshot.md`
+- `docs/48_short_execution_bundle_runtime_and_preset_crud.md`
+- `docs/48_short_execution_optimizer_preset_bundle_save_flow.md`
+- `docs/49_short_execution_presets_management_page.md`
+- `docs/50_short_execution_decision_journal_and_analytics_roadmap.md`
+- `docs/51_short_execution_analytics_v2_followup_spec.md`
+- `docs/52_short_execution_demo_burn_in_stabilization_spec.md`
+- `docs/53_second_pc_sync_runbook.md`
+- `docs/90_next_chat_memory.md`
+- `docs/91_codex_prompt_rules.md`
+- `docs/91_short_execution_controls_reset_trailing_handoff.md`
+- `docs/92_executor_intake_and_status_hotfix.md`
+- `docs/93_trailing_runner_immediate_reprice.md`
+- `docs/94_frontend_backend_transport_map_and_single_socket_plan.md`
+- `docs/94_trailing_runner_activation_removal.md`
+- `docs/95_short_signals_single_socket_runtime_sync.md`
+- `docs/architecture-rules.md`
+- `docs/backend/src/ARCHITECTURE.md`
+- `docs/backend/src/api/ARCHITECTURE.md`
+- `docs/backend/src/api/README.md`
+- `docs/backend/src/bybit/README.md`
+- `docs/backend/src/dev/README.md`
+- `docs/backend/src/engine/README.md`
+- `docs/chat_memory.md`
+- `docs/docs_update_notes.md`
+- `docs/exhaustion_bot_strategy.md`
+- `docs/frontend/README.md`
+- `docs/phase13_completion_spec.md`
+- `docs/short-exhaustion-signal.md`
+- `linux.txt`
+- `sync_second_pc_update.bat`
+- `sync_second_pc_update.sh`
+- `test-mcp.txt`

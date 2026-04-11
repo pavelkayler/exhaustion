@@ -1,0 +1,20 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.0.5/schema.json",
+  "linter": {
+    "rules": {
+      "a11y": {
+        "useSemanticElements": "warn"
+      },
+      "correctness": {
+        "useExhaustiveDependencies": "warn"
+      },
+      "style": {
+        "noDescendingSpecificity": "warn"
+      },
+      "suspicious": {
+        "noArrayIndexKey": "warn",
+        "noExplicitAny": "warn"
+      }
+    }
+  }
+}
