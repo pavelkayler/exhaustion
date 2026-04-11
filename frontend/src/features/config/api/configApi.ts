@@ -1,15 +1,13 @@
-import { getApiBase } from "../../../shared/config/env";
-import { getJson, postJson } from "../../../shared/api/http";
 import type { ConfigResponse, RuntimeConfig } from "../../../shared/types/domain";
+import { requestWsRpc } from "../../ws/hooks/useWsFeed";
 
 export async function fetchRuntimeConfig(): Promise<RuntimeConfig> {
-  const base = getApiBase();
-  const res = await getJson<ConfigResponse>(`${base}/api/config`);
+  const res = await requestWsRpc<ConfigResponse>("config.get");
   return res.config;
 }
 
-export async function updateRuntimeConfig(patch: Partial<RuntimeConfig>): Promise<ConfigResponse> {
-  const base = getApiBase();
-  const res = await postJson<ConfigResponse>(`${base}/api/config`, patch);
-  return res;
+export async function updateRuntimeConfig(
+  patch: Partial<RuntimeConfig>,
+): Promise<ConfigResponse> {
+  return requestWsRpc<ConfigResponse>("config.update", patch);
 }

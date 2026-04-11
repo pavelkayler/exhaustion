@@ -1,10 +1,9 @@
 import { getApiBase } from "../../../shared/config/env";
-import { getJson, postJson } from "../../../shared/api/http";
 import type { StatusResponse } from "../../../shared/types/domain";
+import { requestWsRpc } from "../../ws/hooks/useWsFeed";
 
 export async function fetchStatus(): Promise<StatusResponse> {
-  const api = getApiBase();
-  return getJson<StatusResponse>(`${api}/api/session/status`);
+  return requestWsRpc<StatusResponse>("session.status");
 }
 
 export type StartSessionPayload = Partial<{
@@ -13,22 +12,25 @@ export type StartSessionPayload = Partial<{
   selectedExecutionProfileId: string;
 }>;
 
-export async function startSession(payload?: StartSessionPayload): Promise<StatusResponse> {
-  const api = getApiBase();
-  return postJson<StatusResponse>(`${api}/api/session/start`, payload ?? {});
+export async function startSession(
+  payload?: StartSessionPayload,
+): Promise<StatusResponse> {
+  return requestWsRpc<StatusResponse>("session.start", payload ?? {});
 }
 
 export async function stopSession(): Promise<StatusResponse> {
-  const api = getApiBase();
-  return postJson<StatusResponse>(`${api}/api/session/stop`, {});
+  return requestWsRpc<StatusResponse>("session.stop", {});
 }
 
 export async function pauseSession(): Promise<StatusResponse> {
-  const api = getApiBase();
-  return postJson<StatusResponse>(`${api}/api/session/pause`, {});
+  return requestWsRpc<StatusResponse>("session.pause", {});
 }
 
 export async function resumeSession(): Promise<StatusResponse> {
+  return requestWsRpc<StatusResponse>("session.resume", {});
+}
+
+export function getEventsDownloadUrl(): string {
   const api = getApiBase();
-  return postJson<StatusResponse>(`${api}/api/session/resume`, {});
+  return `${api}/api/session/events/download`;
 }
