@@ -1,0 +1,238 @@
+*** PATCH TARGET: backend/src/api/wsHub.ts
+*** GOAL: finish WS core migration for session/config/manual order control plane
+
+1) EXTEND `ServerWsMessage` AND `ClientWsMessage`
+-------------------------------------------------
+
+REPLACE THIS BLOCK:
+
+type WsRpcAction =
+  | "session.status"
+  | "session.start"
+  | "session.stop"
+  | "session.pause"
+  | "session.resume"
+  | "config.get"
+  | "config.update";
+
+WITH THIS BLOCK:
+
+type WsRpcAction =
+  | "session.status"
+  | "session.start"
+  | "session.stop"
+  | "session.pause"
+  | "session.resume"
+  | "config.get"
+  | "config.update"
+  | "manual_order.submit";
+
+`ServerWsMessage` and `ClientWsMessage` stay the same as in the current WS-core patch,
+but `rpc_result.action` / `rpc_request.action` must use the extended `WsRpcAction` above.
+
+
+2) ADD RUNTIME STATUS HELPER AND RPC ACTION VALIDATOR
+----------------------------------------------------
+
+KEEP `buildRuntimeStatusPayload()` AS IS.
+
+REPLACE `isWsRpcAction(...)` WITH:
+
+function isWsRpcAction(value: unknown): value is WsRpcAction {
+  return value === "session.status"
+    || value === "session.start"
+    || value === "session.stop"
+    || value === "session.pause"
+    || value === "session.resume"
+    || value === "config.get"
+    || value === "config.update"
+    || value === "manual_order.submit";
+}
+
+
+3) ADD SMALL RPC PAYLOAD HELPERS
+--------------------------------
+
+INSERT AFTER `isWsRpcAction(...)`:
+
+function readRpcNumber(value: unknown): number | undefined {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : undefined;
+}
+
+function readRpcRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object"
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+
+4) EXTEND `safeParseClientMsg(...)`
+-----------------------------------
+
+KEEP the current `rpc_request` parsing from the WS-core patch.
+No extra changes are required here apart from the widened `WsRpcAction` union.
+
+
+5) EXTEND `handleRpcRequest(...)`
+---------------------------------
+
+INSIDE `handleRpcRequest(...)`, KEEP all existing `session.*` and `config.*` handlers,
+but apply the following two changes.
+
+### 5.1 `session.start` must honor optional selection payload
+
+REPLACE THE BODY OF THE `session.start` BRANCH WITH:
+
+      if (msg.action === "session.start") {
+        try {
+          const payloadRecord = readRpcRecord(msg.payload);
+          const selectedBotId = String(payloadRecord.selectedBotId ?? "").trim();
+          const selectedBotPresetId = String(payloadRecord.selectedBotPresetId ?? "").trim();
+          const selectedExecutionProfileId = String(payloadRecord.selectedExecutionProfileId ?? "").trim();
+          const hasSelections = Boolean(
+            selectedBotId
+            || selectedBotPresetId
+            || selectedExecutionProfileId
+          );
+
+          if (hasSelections) {
+            configStore.setSelections({
+              ...(selectedBotId ? { selectedBotId } : {}),
+              ...(selectedBotPresetId ? { selectedBotPresetId } : {}),
+              ...(selectedExecutionProfileId ? { selectedExecutionProfileId } : {}),
+            });
+            configStore.persist();
+            syncRuntimeStreamLifecycle();
+          }
+
+          const payload = await runtime.start({
+            waitForReady: async ({ signal }) => {
+              await awaitAllStreamsConnected({ timeoutMs: 15_000, signal });
+            },
+          });
+          broadcastSnapshot();
+          reply({
+            type: "rpc_result",
+            id: msg.id,
+            action: msg.action,
+            ok: true,
+            payload,
+          });
+        } catch (error) {
+          const payload = {
+            ...buildRuntimeStatusPayload(),
+            runtimeMessage: String((error as Error)?.message ?? error),
+          };
+          reply({
+            type: "rpc_result",
+            id: msg.id,
+            action: msg.action,
+            ok: false,
+            error: payload.runtimeMessage,
+            payload,
+          });
+        }
+        return;
+      }
+
+### 5.2 ADD `manual_order.submit`
+
+INSERT THIS NEW BRANCH BEFORE THE FINAL `rpc_action_not_supported` REPLY:
+
+      if (msg.action === "manual_order.submit") {
+        const payloadRecord = readRpcRecord(msg.payload);
+        const symbol = String(payloadRecord.symbol ?? "").trim().toUpperCase();
+        const side = String(payloadRecord.side ?? "").trim().toUpperCase() === "SHORT" ? "SHORT" : "LONG";
+        const executionMode = String(payloadRecord.executionMode ?? "").trim().toLowerCase() === "real" ? "real" : "demo";
+
+        if (!symbol) {
+          reply({
+            type: "rpc_result",
+            id: msg.id,
+            action: msg.action,
+            ok: false,
+            error: "symbol_required",
+            payload: {
+              ok: false,
+              accepted: false,
+              reason: "symbol_required",
+              message: "symbol_required",
+            },
+          });
+          return;
+        }
+
+        const manualOrderArgs: {
+          symbol: string;
+          side: "LONG" | "SHORT";
+          executionMode?: "demo" | "real";
+          entryPrice?: number;
+          tpPrice?: number;
+          slPrice?: number;
+          marginUSDT?: number;
+          leverage?: number;
+        } = {
+          symbol,
+          side,
+          executionMode,
+        };
+
+        const entryPrice = readRpcNumber(payloadRecord.entryPrice);
+        const tpPrice = readRpcNumber(payloadRecord.tpPrice);
+        const slPrice = readRpcNumber(payloadRecord.slPrice);
+        const marginUSDT = readRpcNumber(payloadRecord.marginUSDT);
+        const leverage = readRpcNumber(payloadRecord.leverage);
+
+        if (entryPrice != null) manualOrderArgs.entryPrice = entryPrice;
+        if (tpPrice != null) manualOrderArgs.tpPrice = tpPrice;
+        if (slPrice != null) manualOrderArgs.slPrice = slPrice;
+        if (marginUSDT != null) manualOrderArgs.marginUSDT = marginUSDT;
+        if (leverage != null) manualOrderArgs.leverage = leverage;
+
+        const payload = await submitManualTestOrder(manualOrderArgs);
+        broadcastSnapshot();
+        reply({
+          type: "rpc_result",
+          id: msg.id,
+          action: msg.action,
+          ok: true,
+          payload,
+        });
+        return;
+      }
+
+
+6) SNAPSHOTS MUST INCLUDE FULL SESSION METADATA
+-----------------------------------------------
+
+KEEP the current WS-core patch changes here:
+
+- `sendRowsToClient(...)` snapshot payload must use `...buildRuntimeStatusPayload()`
+- `broadcastSnapshot(...)` snapshot payload must use `...buildRuntimeStatusPayload()`
+- initial `wss.on("connection", ...)` snapshot payload must use `...buildRuntimeStatusPayload()`
+
+No additional changes are required in this step.
+
+
+7) HANDLE `rpc_request` IN WS MESSAGE LOOP
+------------------------------------------
+
+KEEP the current WS-core patch behavior:
+
+        if (msg.type === "rpc_request") {
+          void handleRpcRequest(ws, msg);
+          return;
+        }
+
+
+8) HTTP COMPAT
+--------------
+
+Do NOT remove the existing HTTP route:
+
+- `POST /api/manual-test-order`
+
+It can stay as compat.
+Frontend switches to WS-RPC, but server-to-exchange execution still goes through the same runtime/broker path.
+That is expected and correct.

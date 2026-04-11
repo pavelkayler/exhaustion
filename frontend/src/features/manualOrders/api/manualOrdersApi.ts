@@ -1,6 +1,5 @@
-import { postJson } from "../../../shared/api/http";
-import { getApiBase } from "../../../shared/config/env";
 import type { ManualTestOrderResponse } from "../../../shared/types/domain";
+import { requestWsRpc } from "../../ws/hooks/useWsFeed";
 
 export async function submitManualTestOrder(payload: {
   symbol: string;
@@ -12,6 +11,5 @@ export async function submitManualTestOrder(payload: {
   marginUSDT?: number;
   leverage?: number;
 }): Promise<ManualTestOrderResponse> {
-  const base = getApiBase();
-  return await postJson<ManualTestOrderResponse>(`${base}/api/manual-test-order`, payload);
+  return requestWsRpc<ManualTestOrderResponse>("manual_order.submit", payload);
 }

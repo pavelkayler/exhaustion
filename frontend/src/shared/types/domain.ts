@@ -130,6 +130,15 @@ export type ShortOiSpikeWatchlistRecord = {
   coinglassUrl: string;
 };
 
+export type WsRpcAction =
+  | "session.status"
+  | "session.start"
+  | "session.stop"
+  | "session.pause"
+  | "session.resume"
+  | "config.get"
+  | "config.update"
+  | "manual_order.submit";
 
 export type WsMessage =
   | { type: "hello"; serverTime: number }
@@ -138,7 +147,11 @@ export type WsMessage =
       payload: {
         sessionState: SessionState;
         sessionId: string | null;
+        eventsFile?: string | null;
         runningSinceMs?: number | null;
+        runtimeMessage?: string | null;
+        runningBotId?: string | null;
+        runningBotName?: string | null;
         rows: SymbolRow[];
         botStats: BotStats;
         universeSelectedId: string;
@@ -162,4 +175,5 @@ export type WsMessage =
   | { type: "streams_state"; payload: StreamsState }
   | { type: "events_tail"; payload: { limit: number; count: number; events: LogEvent[] } }
   | { type: "events_append"; payload: { event: LogEvent } }
+  | { type: "rpc_result"; id: string; action: WsRpcAction; ok: boolean; payload?: unknown; error?: string | null }
   | { type: "error"; message: string };
