@@ -22,6 +22,7 @@ export type ExecutionOrderRow = {
   key: string;
   symbol: string;
   reason: ExecutionReason;
+  value: number | null;
   margin: number | null;
   leverage: number | null;
   entryPrice: number | null;

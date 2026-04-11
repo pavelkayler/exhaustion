@@ -35,6 +35,7 @@ type ExecutionOrderRow = {
   key: string;
   symbol: string;
   reason: ExecutionReason;
+  value: number | null;
   margin: number | null;
   leverage: number | null;
   entryPrice: number | null;
@@ -173,11 +174,16 @@ function isActiveOrderStatus(value: unknown): boolean {
   );
 }
 
+function isLimitOrderType(value: unknown): boolean {
+  return String(value ?? "").trim().toUpperCase() === "LIMIT";
+}
+
 function normalizeOrderRow(
   row: Record<string, unknown>,
   leverageFallbackBySymbol: Map<string, number | null>,
 ): ExecutionOrderRow | null {
   if (!isActiveOrderStatus(row.orderStatus)) return null;
+  if (!isLimitOrderType(row.orderType)) return null;
 
   const symbol = String(row.symbol ?? "").trim().toUpperCase();
   if (!symbol) return null;
@@ -198,13 +204,13 @@ function normalizeOrderRow(
     readPositiveNumber(row.orderQty) ??
     readPositiveNumber(row.size);
 
-  const notional =
+  const value =
     (entryPrice != null && qty != null ? entryPrice * qty : null) ??
     readPositiveNumber(row.orderValue) ??
     readPositiveNumber(row.positionValue);
 
   const margin =
-    (notional != null && leverage != null && leverage > 0 ? notional / leverage : null) ??
+    (value != null && leverage != null && leverage > 0 ? value / leverage : null) ??
     readPositiveNumber(row.orderMargin) ??
     readPositiveNumber(row.positionIM) ??
     readPositiveNumber(row.positionBalance);
@@ -213,6 +219,7 @@ function normalizeOrderRow(
     key,
     symbol,
     reason: inferReason(row),
+    value,
     margin,
     leverage,
     entryPrice,
@@ -270,7 +277,9 @@ function safeSend(ws: WebSocket, body: ServerMessage): void {
 
 function parseMessageItems(value: unknown): Array<Record<string, unknown>> {
   if (Array.isArray(value)) {
-    return value.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"));
+    return value.filter(
+      (item): item is Record<string, unknown> => Boolean(item && typeof item === "object"),
+    );
   }
   if (value && typeof value === "object") {
     return [value as Record<string, unknown>];
@@ -288,6 +297,9 @@ class BybitPrivateExecutionStream {
   private publicReconnectTimer: NodeJS.Timeout | null = null;
   private publicReconnectAttempt = 0;
   private publicSymbolsKey = "";
+
+  private reconcileTimer: NodeJS.Timeout | null = null;
+  private lastSeedStartedAt = 0;
 
   private shouldRun = false;
   private status: FeedStatus;
@@ -383,10 +395,12 @@ class BybitPrivateExecutionStream {
     if (this.privateReconnectTimer) clearTimeout(this.privateReconnectTimer);
     if (this.privatePingTimer) clearInterval(this.privatePingTimer);
     if (this.publicReconnectTimer) clearTimeout(this.publicReconnectTimer);
+    if (this.reconcileTimer) clearTimeout(this.reconcileTimer);
 
     this.privateReconnectTimer = null;
     this.privatePingTimer = null;
     this.publicReconnectTimer = null;
+    this.reconcileTimer = null;
 
     try {
       this.privateWs?.close();
@@ -400,12 +414,28 @@ class BybitPrivateExecutionStream {
     this.publicSymbolsKey = "";
   }
 
+  private scheduleSeedFromRest(reason: string, delayMs = 250): void {
+    if (!this.shouldRun || !this.seedClient || !this.seedClient.hasCredentials()) return;
+
+    const now = Date.now();
+    const minDelay = Math.max(0, 1_000 - (now - this.lastSeedStartedAt));
+    const nextDelay = Math.max(delayMs, minDelay);
+
+    if (this.reconcileTimer) clearTimeout(this.reconcileTimer);
+    this.reconcileTimer = setTimeout(() => {
+      this.reconcileTimer = null;
+      void this.seedFromRest(reason);
+    }, nextDelay);
+  }
+
   private async seedFromRest(reason: string): Promise<void> {
     if (!this.shouldRun) return;
     if (!this.seedClient || !this.seedClient.hasCredentials()) return;
     if (this.seedInFlight) return;
 
     this.seedInFlight = true;
+    this.lastSeedStartedAt = Date.now();
+
     try {
       const [positionsResp, ordersResp] = await Promise.all([
         this.seedClient.getPositionsLinear({ settleCoin: "USDT" }),
@@ -513,7 +543,7 @@ class BybitPrivateExecutionStream {
           if (msg.success === true) {
             this.status = "subscribing";
             this.error = null;
-            socket.send(JSON.stringify({ op: "subscribe", args: ["position", "order"] }));
+            socket.send(JSON.stringify({ op: "subscribe", args: ["position", "order", "execution"] }));
             return;
           }
 
@@ -542,23 +572,34 @@ class BybitPrivateExecutionStream {
         }
 
         if (msg.topic === "position") {
+          let mutated = false;
+
           for (const item of parseMessageItems(msg.data)) {
             const normalized = normalizePositionRow(item);
             const key = toPositionKey(item);
+
             if (!normalized) {
-              this.positions.delete(key);
+              if (this.positions.delete(key)) mutated = true;
               continue;
             }
+
             this.positions.set(key, normalized);
+            mutated = true;
           }
-          this.updatedAt = Date.now();
-          this.status = "connected";
-          this.error = null;
-          this.syncPublicTickerSocket();
+
+          if (mutated) {
+            this.updatedAt = Date.now();
+            this.status = "connected";
+            this.error = null;
+            this.syncPublicTickerSocket();
+          }
           return;
         }
 
         if (msg.topic === "order") {
+          let mutated = false;
+          let needsReconcile = false;
+
           const leverageFallbackBySymbol = new Map<string, number | null>();
           for (const position of this.positions.values()) {
             leverageFallbackBySymbol.set(position.symbol, position.leverage);
@@ -567,16 +608,40 @@ class BybitPrivateExecutionStream {
           for (const item of parseMessageItems(msg.data)) {
             const normalized = normalizeOrderRow(item, leverageFallbackBySymbol);
             const key = toOrderKey(item);
+
             if (!normalized) {
-              this.orders.delete(key);
+              if (this.orders.delete(key)) mutated = true;
+              needsReconcile = true;
               continue;
             }
+
             this.orders.set(key, normalized);
+            mutated = true;
+
+            if (!isActiveOrderStatus(item.orderStatus)) {
+              needsReconcile = true;
+            }
           }
+
+          if (mutated) {
+            this.updatedAt = Date.now();
+            this.status = "connected";
+            this.error = null;
+            this.syncPublicTickerSocket();
+          }
+
+          if (needsReconcile) {
+            this.scheduleSeedFromRest("order_state_change", 250);
+          }
+          return;
+        }
+
+        if (msg.topic === "execution") {
           this.updatedAt = Date.now();
           this.status = "connected";
           this.error = null;
-          this.syncPublicTickerSocket();
+          this.scheduleSeedFromRest("execution_event", 250);
+          return;
         }
       } catch (error) {
         this.status = "error";
@@ -687,6 +752,7 @@ class BybitPrivateExecutionStream {
 
         const payload =
           msg.data && typeof msg.data === "object" ? (msg.data as Record<string, unknown>) : {};
+
         const currentPrice =
           readPositiveNumber(payload.markPrice) ??
           readPositiveNumber(payload.lastPrice) ??
