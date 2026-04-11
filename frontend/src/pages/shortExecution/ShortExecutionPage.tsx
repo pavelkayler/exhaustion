@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { Badge, Card, Col, Container, Form, Row, Table } from "react-bootstrap";
 import { HeaderBar } from "../dashboard/components/HeaderBar";
 import { useSessionRuntime } from "../../features/session/hooks/useSessionRuntime";
@@ -5,6 +6,7 @@ import { useWsFeed } from "../../features/ws/hooks/useWsFeed";
 import { usePersistentState } from "../../shared/hooks/usePersistentState";
 import {
   usePrivatePositionsFeed,
+  type ExecutionPositionReason,
   type ExecutionPositionRow,
 } from "../../features/positions/hooks/usePrivatePositionsFeed";
 
@@ -53,9 +55,22 @@ type NumericFieldKey =
   | "staleSec"
   | "cooldownMin";
 
-function formatNumber(value: number | null | undefined, digits = 2): string {
+type DisplayPositionRow = ExecutionPositionRow & {
+  displayValue: number | null;
+  displayPnl: number | null;
+  displayTpPct: number | null;
+  displaySlPct: number | null;
+};
+
+function formatCurrency(value: number | null | undefined, digits = 2): string {
   if (!Number.isFinite(value as number)) return "-";
-  return Number(value).toFixed(digits);
+  return `$${Number(value).toFixed(digits)}`;
+}
+
+function formatPercent(value: number | null | undefined, digits = 2): string {
+  if (!Number.isFinite(value as number)) return "-";
+  const numeric = Number(value);
+  return `${numeric >= 0 ? "+" : ""}${numeric.toFixed(digits)}%`;
 }
 
 function formatUpdatedAt(value: number | null | undefined): string {
@@ -79,13 +94,51 @@ function renderPositionMessage(status: string, error: string | null): string {
   return "No open positions.";
 }
 
-function rowVariantClass(row: ExecutionPositionRow): string {
-  if (!Number.isFinite(row.pnl as number) || Number(row.pnl) === 0) return "";
-  return Number(row.pnl) > 0 ? "text-success" : "text-danger";
+function rowVariantClass(row: { displayPnl: number | null }): string {
+  if (!Number.isFinite(row.displayPnl as number) || Number(row.displayPnl) === 0) return "";
+  return Number(row.displayPnl) > 0 ? "text-success" : "text-danger";
+}
+
+function normalizeReason(value: ExecutionPositionReason): string {
+  return value === "candidate" ? "candidate" : value === "final" ? "final" : "manual";
+}
+
+function computeLivePnl(args: {
+  side: string | null;
+  size: number | null;
+  entryPrice: number | null;
+  currentPrice: number | null;
+  fallbackPnl: number | null;
+}): number | null {
+  const size = Number(args.size);
+  const entryPrice = Number(args.entryPrice);
+  const currentPrice = Number(args.currentPrice);
+  const side = String(args.side ?? "").trim().toUpperCase();
+
+  if (!(size > 0) || !(entryPrice > 0) || !(currentPrice > 0)) {
+    return args.fallbackPnl;
+  }
+
+  if (side === "SELL") {
+    return (entryPrice - currentPrice) * size;
+  }
+
+  if (side === "BUY") {
+    return (currentPrice - entryPrice) * size;
+  }
+
+  return args.fallbackPnl;
+}
+
+function computeTargetPct(targetPrice: number | null, entryPrice: number | null): number | null {
+  const target = Number(targetPrice);
+  const entry = Number(entryPrice);
+  if (!(target > 0) || !(entry > 0)) return null;
+  return ((target - entry) / entry) * 100;
 }
 
 export function ShortExecutionPage() {
-  const { conn, lastServerTime, wsUrl, streams } = useWsFeed();
+  const { conn, lastServerTime, wsUrl, streams, rows } = useWsFeed();
   const { status, busy, start, stop, pause, resume, canStart, canStop, canPause, canResume } =
     useSessionRuntime();
   const [settings, setSettings] = usePersistentState<ExecutorLocalSettings>(
@@ -93,6 +146,42 @@ export function ShortExecutionPage() {
     DEFAULT_SETTINGS,
   );
   const positionsFeed = usePrivatePositionsFeed(settings.mode);
+
+  const marketPriceBySymbol = useMemo(() => {
+    const out = new Map<string, number>();
+    for (const row of rows) {
+      const symbol = String(row.symbol ?? "").trim().toUpperCase();
+      const markPrice = Number(row.markPrice ?? row.lastPrice ?? 0);
+      if (!symbol || !(markPrice > 0)) continue;
+      out.set(symbol, markPrice);
+    }
+    return out;
+  }, [rows]);
+
+  const displayRows = useMemo<DisplayPositionRow[]>(() => {
+    return positionsFeed.rows.map((row) => {
+      const currentPrice = marketPriceBySymbol.get(row.symbol) ?? row.markPrice ?? null;
+      const size = Number(row.size ?? 0);
+      const displayValue =
+        size > 0 && Number(currentPrice) > 0
+          ? size * Number(currentPrice)
+          : row.value ?? null;
+
+      return {
+        ...row,
+        displayValue,
+        displayPnl: computeLivePnl({
+          side: row.side,
+          size: row.size,
+          entryPrice: row.entryPrice,
+          currentPrice,
+          fallbackPnl: row.pnl,
+        }),
+        displayTpPct: computeTargetPct(row.tp, row.entryPrice),
+        displaySlPct: computeTargetPct(row.sl, row.entryPrice),
+      };
+    });
+  }, [marketPriceBySymbol, positionsFeed.rows]);
 
   const updateNumber = (key: NumericFieldKey, value: string) => {
     const numeric = Number(value);
@@ -155,15 +244,17 @@ export function ShortExecutionPage() {
               <Card.Body className="p-0">
                 <Table responsive hover className="mb-0" style={{ tableLayout: "fixed" }}>
                   <colgroup>
-                    <col style={{ width: "28%" }} />
-                    <col style={{ width: "18%" }} />
-                    <col style={{ width: "18%" }} />
-                    <col style={{ width: "18%" }} />
-                    <col style={{ width: "18%" }} />
+                    <col style={{ width: "20%" }} />
+                    <col style={{ width: "16%" }} />
+                    <col style={{ width: "16%" }} />
+                    <col style={{ width: "16%" }} />
+                    <col style={{ width: "16%" }} />
+                    <col style={{ width: "16%" }} />
                   </colgroup>
                   <thead>
                     <tr>
                       <th>Symbol</th>
+                      <th>Reason</th>
                       <th>Value</th>
                       <th>PnL</th>
                       <th>TP</th>
@@ -171,25 +262,19 @@ export function ShortExecutionPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {positionsFeed.rows.map((row) => (
+                    {displayRows.map((row) => (
                       <tr key={row.key}>
-                        <td>
-                          <div className="d-flex flex-column">
-                            <span>{row.symbol}</span>
-                            {row.side ? (
-                              <small className="text-secondary">{row.side}</small>
-                            ) : null}
-                          </div>
-                        </td>
-                        <td>{formatNumber(row.value, 2)}</td>
-                        <td className={rowVariantClass(row)}>{formatNumber(row.pnl, 2)}</td>
-                        <td>{formatNumber(row.tp, 6)}</td>
-                        <td>{formatNumber(row.sl, 6)}</td>
+                        <td>{row.symbol}</td>
+                        <td>{normalizeReason(row.reason)}</td>
+                        <td>{formatCurrency(row.displayValue, 2)}</td>
+                        <td className={rowVariantClass(row)}>{formatCurrency(row.displayPnl, 2)}</td>
+                        <td>{formatPercent(row.displayTpPct, 2)}</td>
+                        <td>{formatPercent(row.displaySlPct, 2)}</td>
                       </tr>
                     ))}
-                    {positionsFeed.rows.length === 0 ? (
+                    {displayRows.length === 0 ? (
                       <tr>
-                        <td colSpan={5} className="text-center text-secondary py-4">
+                        <td colSpan={6} className="text-center text-secondary py-4">
                           {renderPositionMessage(positionsFeed.status, positionsFeed.error)}
                         </td>
                       </tr>

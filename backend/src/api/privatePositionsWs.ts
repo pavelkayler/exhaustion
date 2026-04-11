@@ -3,6 +3,7 @@ import type { FastifyBaseLogger } from "fastify";
 import { WebSocketServer, WebSocket, type RawData } from "ws";
 
 type ExecutionMode = "demo" | "real";
+type ExecutionPositionReason = "manual" | "candidate" | "final";
 
 type FeedStatus =
   | "connecting"
@@ -16,11 +17,15 @@ type FeedStatus =
 type ExecutionPositionRow = {
   key: string;
   symbol: string;
+  reason: ExecutionPositionReason;
   value: number | null;
   pnl: number | null;
   tp: number | null;
   sl: number | null;
   side: string | null;
+  size: number | null;
+  entryPrice: number | null;
+  markPrice: number | null;
   updatedAt: number | null;
 };
 
@@ -55,6 +60,22 @@ function readPositiveNumber(value: unknown): number | null {
   return numeric != null && numeric > 0 ? numeric : null;
 }
 
+function inferPositionReason(row: Record<string, unknown>): ExecutionPositionReason {
+  const directReason = String(row.reason ?? row.openReason ?? row.positionReason ?? "")
+    .trim()
+    .toLowerCase();
+
+  if (directReason === "candidate" || directReason === "final" || directReason === "manual") {
+    return directReason;
+  }
+
+  const orderLinkId = String(row.orderLinkId ?? row.positionLinkId ?? "").trim().toLowerCase();
+  if (orderLinkId.includes("candidate")) return "candidate";
+  if (orderLinkId.includes("final")) return "final";
+
+  return "manual";
+}
+
 function toPositionKey(row: Record<string, unknown>): string {
   const symbol = String(row.symbol ?? "").trim().toUpperCase();
   const positionIdx = String(row.positionIdx ?? "0").trim() || "0";
@@ -77,11 +98,15 @@ function normalizePositionRow(
   return {
     key,
     symbol,
+    reason: inferPositionReason(row),
     value: readNumber(row.positionValue ?? row.positionBalance ?? row.positionIM),
     pnl: readNumber(row.unrealisedPnl),
     tp: readPositiveNumber(row.takeProfit),
     sl: readPositiveNumber(row.stopLoss),
     side,
+    size: readPositiveNumber(row.size),
+    entryPrice: readPositiveNumber(row.avgPrice),
+    markPrice: readPositiveNumber(row.markPrice),
     updatedAt: readNumber(row.updatedTime) ?? Date.now(),
   };
 }
@@ -130,7 +155,7 @@ class BybitPrivatePositionsStream {
       rows: Array.from(this.positions.values()).sort((left, right) => {
         const symbolCmp = left.symbol.localeCompare(right.symbol);
         if (symbolCmp !== 0) return symbolCmp;
-        return String(left.side ?? "").localeCompare(String(right.side ?? ""));
+        return left.key.localeCompare(right.key);
       }),
     };
   }
@@ -349,7 +374,7 @@ export function createPrivatePositionsWs(app: {
     wss = new WebSocketServer({
       host,
       port,
-      path: POSITIONS_WS_PATH,
+      path: "/ws/private-positions",
     });
 
     broadcastTimer = setInterval(() => {
@@ -359,7 +384,7 @@ export function createPrivatePositionsWs(app: {
     wss.on("connection", (ws, request) => {
       const mode = (() => {
         try {
-          const url = new URL(request.url ?? POSITIONS_WS_PATH, "http://localhost");
+          const url = new URL(request.url ?? "/ws/private-positions", "http://localhost");
           return normalizeMode(url.searchParams.get("mode"));
         } catch {
           return "demo";
@@ -383,7 +408,10 @@ export function createPrivatePositionsWs(app: {
       });
     });
 
-    app.log.info({ host, port, path: POSITIONS_WS_PATH }, "private positions ws ready");
+    app.log.info(
+      { host, port, path: "/ws/private-positions" },
+      "private positions ws ready",
+    );
   });
 
   app.addHook("onClose", async () => {

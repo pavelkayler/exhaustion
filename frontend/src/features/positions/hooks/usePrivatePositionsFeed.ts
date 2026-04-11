@@ -1,14 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
 import { getPrivatePositionsWsUrl } from "../../../shared/config/env";
 
+export type ExecutionPositionReason = "manual" | "candidate" | "final";
+
 export type ExecutionPositionRow = {
   key: string;
   symbol: string;
+  reason: ExecutionPositionReason;
   value: number | null;
   pnl: number | null;
   tp: number | null;
   sl: number | null;
   side: string | null;
+  size: number | null;
+  entryPrice: number | null;
+  markPrice: number | null;
   updatedAt: number | null;
 };
 
