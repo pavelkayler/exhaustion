@@ -1,4 +1,3 @@
-import { useMemo } from "react";
 import { Badge, Card, Col, Container, Form, Row, Table } from "react-bootstrap";
 import { HeaderBar } from "../dashboard/components/HeaderBar";
 import { useSessionRuntime } from "../../features/session/hooks/useSessionRuntime";
@@ -6,8 +5,9 @@ import { useWsFeed } from "../../features/ws/hooks/useWsFeed";
 import { usePersistentState } from "../../shared/hooks/usePersistentState";
 import {
   usePrivatePositionsFeed,
-  type ExecutionPositionReason,
+  type ExecutionOrderRow,
   type ExecutionPositionRow,
+  type ExecutionReason,
 } from "../../features/positions/hooks/usePrivatePositionsFeed";
 
 type ExecutorLocalSettings = {
@@ -55,16 +55,9 @@ type NumericFieldKey =
   | "staleSec"
   | "cooldownMin";
 
-type DisplayPositionRow = ExecutionPositionRow & {
-  displayValue: number | null;
-  displayPnl: number | null;
-  displayTpPct: number | null;
-  displaySlPct: number | null;
-};
-
-function formatCurrency(value: number | null | undefined, digits = 2): string {
+function formatCurrencyRight(value: number | null | undefined, digits = 2): string {
   if (!Number.isFinite(value as number)) return "-";
-  return `$${Number(value).toFixed(digits)}`;
+  return `${Number(value).toFixed(digits)} $`;
 }
 
 function formatPercent(value: number | null | undefined, digits = 2): string {
@@ -73,9 +66,28 @@ function formatPercent(value: number | null | undefined, digits = 2): string {
   return `${numeric >= 0 ? "+" : ""}${numeric.toFixed(digits)}%`;
 }
 
+function formatLeverage(value: number | null | undefined): string {
+  if (!Number.isFinite(value as number)) return "-";
+  return `${Number(value).toFixed(Number.isInteger(Number(value)) ? 0 : 2)}x`;
+}
+
 function formatUpdatedAt(value: number | null | undefined): string {
   if (!Number.isFinite(value as number)) return "-";
   return new Date(Number(value)).toLocaleTimeString();
+}
+
+function formatMoscowDateTime(value: number | null | undefined): string {
+  if (!Number.isFinite(value as number)) return "-";
+  return new Intl.DateTimeFormat("ru-RU", {
+    timeZone: "Europe/Moscow",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(new Date(Number(value)));
 }
 
 function renderPositionMessage(status: string, error: string | null): string {
@@ -94,40 +106,29 @@ function renderPositionMessage(status: string, error: string | null): string {
   return "No open positions.";
 }
 
-function rowVariantClass(row: { displayPnl: number | null }): string {
-  if (!Number.isFinite(row.displayPnl as number) || Number(row.displayPnl) === 0) return "";
-  return Number(row.displayPnl) > 0 ? "text-success" : "text-danger";
+function renderOrdersMessage(status: string, error: string | null): string {
+  if (error) return error;
+  if (status === "missing_credentials") {
+    return "Bybit private websocket credentials are missing in ./backend/.env.";
+  }
+  if (
+    status === "connecting" ||
+    status === "authenticating" ||
+    status === "subscribing" ||
+    status === "reconnecting"
+  ) {
+    return `Orders feed: ${status}.`;
+  }
+  return "No placed orders.";
 }
 
-function normalizeReason(value: ExecutionPositionReason): string {
+function rowVariantClass(row: Pick<ExecutionPositionRow, "pnl">): string {
+  if (!Number.isFinite(row.pnl as number) || Number(row.pnl) === 0) return "";
+  return Number(row.pnl) > 0 ? "text-success" : "text-danger";
+}
+
+function normalizeReason(value: ExecutionReason): string {
   return value === "candidate" ? "candidate" : value === "final" ? "final" : "manual";
-}
-
-function computeLivePnl(args: {
-  side: string | null;
-  size: number | null;
-  entryPrice: number | null;
-  currentPrice: number | null;
-  fallbackPnl: number | null;
-}): number | null {
-  const size = Number(args.size);
-  const entryPrice = Number(args.entryPrice);
-  const currentPrice = Number(args.currentPrice);
-  const side = String(args.side ?? "").trim().toUpperCase();
-
-  if (!(size > 0) || !(entryPrice > 0) || !(currentPrice > 0)) {
-    return args.fallbackPnl;
-  }
-
-  if (side === "SELL") {
-    return (entryPrice - currentPrice) * size;
-  }
-
-  if (side === "BUY") {
-    return (currentPrice - entryPrice) * size;
-  }
-
-  return args.fallbackPnl;
 }
 
 function computeTargetPct(targetPrice: number | null, entryPrice: number | null): number | null {
@@ -138,50 +139,14 @@ function computeTargetPct(targetPrice: number | null, entryPrice: number | null)
 }
 
 export function ShortExecutionPage() {
-  const { conn, lastServerTime, wsUrl, streams, rows } = useWsFeed();
+  const { conn, lastServerTime, wsUrl, streams } = useWsFeed();
   const { status, busy, start, stop, pause, resume, canStart, canStop, canPause, canResume } =
     useSessionRuntime();
   const [settings, setSettings] = usePersistentState<ExecutorLocalSettings>(
     "short-execution.local-settings",
     DEFAULT_SETTINGS,
   );
-  const positionsFeed = usePrivatePositionsFeed(settings.mode);
-
-  const marketPriceBySymbol = useMemo(() => {
-    const out = new Map<string, number>();
-    for (const row of rows) {
-      const symbol = String(row.symbol ?? "").trim().toUpperCase();
-      const markPrice = Number(row.markPrice ?? row.lastPrice ?? 0);
-      if (!symbol || !(markPrice > 0)) continue;
-      out.set(symbol, markPrice);
-    }
-    return out;
-  }, [rows]);
-
-  const displayRows = useMemo<DisplayPositionRow[]>(() => {
-    return positionsFeed.rows.map((row) => {
-      const currentPrice = marketPriceBySymbol.get(row.symbol) ?? row.markPrice ?? null;
-      const size = Number(row.size ?? 0);
-      const displayValue =
-        size > 0 && Number(currentPrice) > 0
-          ? size * Number(currentPrice)
-          : row.value ?? null;
-
-      return {
-        ...row,
-        displayValue,
-        displayPnl: computeLivePnl({
-          side: row.side,
-          size: row.size,
-          entryPrice: row.entryPrice,
-          currentPrice,
-          fallbackPnl: row.pnl,
-        }),
-        displayTpPct: computeTargetPct(row.tp, row.entryPrice),
-        displaySlPct: computeTargetPct(row.sl, row.entryPrice),
-      };
-    });
-  }, [marketPriceBySymbol, positionsFeed.rows]);
+  const executionFeed = usePrivatePositionsFeed(settings.mode);
 
   const updateNumber = (key: NumericFieldKey, value: string) => {
     const numeric = Number(value);
@@ -226,7 +191,7 @@ export function ShortExecutionPage() {
                 mode: {settings.mode}
               </Badge>
               <small className="text-secondary">
-                positions feed: {positionsFeed.status}
+                positions feed: {executionFeed.status}
               </small>
             </div>
           </Card.Body>
@@ -238,7 +203,7 @@ export function ShortExecutionPage() {
               <Card.Header className="d-flex align-items-center justify-content-between gap-3 flex-wrap">
                 <span>Positions</span>
                 <small className="text-secondary">
-                  updated: {formatUpdatedAt(positionsFeed.updatedAt)}
+                  updated: {formatUpdatedAt(executionFeed.updatedAt)}
                 </small>
               </Card.Header>
               <Card.Body className="p-0">
@@ -262,20 +227,67 @@ export function ShortExecutionPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {displayRows.map((row) => (
+                    {executionFeed.positions.map((row) => (
                       <tr key={row.key}>
                         <td>{row.symbol}</td>
                         <td>{normalizeReason(row.reason)}</td>
-                        <td>{formatCurrency(row.displayValue, 2)}</td>
-                        <td className={rowVariantClass(row)}>{formatCurrency(row.displayPnl, 2)}</td>
-                        <td>{formatPercent(row.displayTpPct, 2)}</td>
-                        <td>{formatPercent(row.displaySlPct, 2)}</td>
+                        <td>{formatCurrencyRight(row.value, 2)}</td>
+                        <td className={rowVariantClass(row)}>{formatCurrencyRight(row.pnl, 2)}</td>
+                        <td>{formatPercent(computeTargetPct(row.tp, row.entryPrice), 2)}</td>
+                        <td>{formatPercent(computeTargetPct(row.sl, row.entryPrice), 2)}</td>
                       </tr>
                     ))}
-                    {displayRows.length === 0 ? (
+                    {executionFeed.positions.length === 0 ? (
                       <tr>
                         <td colSpan={6} className="text-center text-secondary py-4">
-                          {renderPositionMessage(positionsFeed.status, positionsFeed.error)}
+                          {renderPositionMessage(executionFeed.status, executionFeed.error)}
+                        </td>
+                      </tr>
+                    ) : null}
+                  </tbody>
+                </Table>
+              </Card.Body>
+            </Card>
+          </Col>
+
+          <Col xs={12}>
+            <Card className="genesis-card">
+              <Card.Header>Placed Orders</Card.Header>
+              <Card.Body className="p-0">
+                <Table responsive hover className="mb-0" style={{ tableLayout: "fixed" }}>
+                  <colgroup>
+                    <col style={{ width: "18%" }} />
+                    <col style={{ width: "14%" }} />
+                    <col style={{ width: "16%" }} />
+                    <col style={{ width: "12%" }} />
+                    <col style={{ width: "16%" }} />
+                    <col style={{ width: "24%" }} />
+                  </colgroup>
+                  <thead>
+                    <tr>
+                      <th>Symbol</th>
+                      <th>Reason</th>
+                      <th>Margin</th>
+                      <th>Leverage</th>
+                      <th>Entry Price</th>
+                      <th>Placed</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {executionFeed.orders.map((row) => (
+                      <tr key={row.key}>
+                        <td>{row.symbol}</td>
+                        <td>{normalizeReason(row.reason)}</td>
+                        <td>{formatCurrencyRight(row.margin, 2)}</td>
+                        <td>{formatLeverage(row.leverage)}</td>
+                        <td>{formatCurrencyRight(row.entryPrice, 2)}</td>
+                        <td>{formatMoscowDateTime(row.placedAt)}</td>
+                      </tr>
+                    ))}
+                    {executionFeed.orders.length === 0 ? (
+                      <tr>
+                        <td colSpan={6} className="text-center text-secondary py-4">
+                          {renderOrdersMessage(executionFeed.status, executionFeed.error)}
                         </td>
                       </tr>
                     ) : null}

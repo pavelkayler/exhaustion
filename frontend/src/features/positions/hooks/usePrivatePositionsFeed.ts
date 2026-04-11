@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { getPrivatePositionsWsUrl } from "../../../shared/config/env";
 
-export type ExecutionPositionReason = "manual" | "candidate" | "final";
+export type ExecutionReason = "manual" | "candidate" | "final";
 
 export type ExecutionPositionRow = {
   key: string;
   symbol: string;
-  reason: ExecutionPositionReason;
+  reason: ExecutionReason;
   value: number | null;
   pnl: number | null;
   tp: number | null;
@@ -18,7 +18,18 @@ export type ExecutionPositionRow = {
   updatedAt: number | null;
 };
 
-type PositionsFeedStatus =
+export type ExecutionOrderRow = {
+  key: string;
+  symbol: string;
+  reason: ExecutionReason;
+  margin: number | null;
+  leverage: number | null;
+  entryPrice: number | null;
+  placedAt: number | null;
+  updatedAt: number | null;
+};
+
+type ExecutionFeedStatus =
   | "connecting"
   | "authenticating"
   | "subscribing"
@@ -27,14 +38,15 @@ type PositionsFeedStatus =
   | "missing_credentials"
   | "error";
 
-type PrivatePositionsMessage =
+type PrivateExecutionMessage =
   | {
-      type: "hello" | "positions_snapshot";
+      type: "hello" | "execution_snapshot";
       payload: {
         mode: "demo" | "real";
-        status: PositionsFeedStatus;
+        status: ExecutionFeedStatus;
         updatedAt: number | null;
-        rows: ExecutionPositionRow[];
+        positions: ExecutionPositionRow[];
+        orders: ExecutionOrderRow[];
         error?: string | null;
       };
     }
@@ -42,8 +54,9 @@ type PrivatePositionsMessage =
 
 type FeedState = {
   conn: "CONNECTING" | "CONNECTED" | "DISCONNECTED";
-  status: PositionsFeedStatus;
-  rows: ExecutionPositionRow[];
+  status: ExecutionFeedStatus;
+  positions: ExecutionPositionRow[];
+  orders: ExecutionOrderRow[];
   updatedAt: number | null;
   error: string | null;
 };
@@ -51,7 +64,8 @@ type FeedState = {
 const EMPTY_STATE: FeedState = {
   conn: "CONNECTING",
   status: "connecting",
-  rows: [],
+  positions: [],
+  orders: [],
   updatedAt: null,
   error: null,
 };
@@ -85,7 +99,7 @@ export function usePrivatePositionsFeed(mode: "demo" | "real") {
       socket.onmessage = (event) => {
         if (!active) return;
         try {
-          const msg = JSON.parse(String(event.data)) as PrivatePositionsMessage;
+          const msg = JSON.parse(String(event.data)) as PrivateExecutionMessage;
           if (msg.type === "error") {
             setState((prev) => ({ ...prev, error: msg.message }));
             return;
@@ -93,7 +107,8 @@ export function usePrivatePositionsFeed(mode: "demo" | "real") {
           setState({
             conn: "CONNECTED",
             status: msg.payload.status,
-            rows: Array.isArray(msg.payload.rows) ? msg.payload.rows : [],
+            positions: Array.isArray(msg.payload.positions) ? msg.payload.positions : [],
+            orders: Array.isArray(msg.payload.orders) ? msg.payload.orders : [],
             updatedAt: msg.payload.updatedAt ?? null,
             error: msg.payload.error ?? null,
           });
