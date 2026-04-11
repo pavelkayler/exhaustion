@@ -14,14 +14,13 @@ export function getWsUrl(): string {
 
 export function getPrivatePositionsWsUrl(mode: "demo" | "real"): string {
   const env = import.meta.env?.VITE_POSITIONS_WS_URL;
-  const base = env && typeof env === "string" && env.length > 0 ? env : getWsUrl();
+  const proto = window.location.protocol === "https:" ? "wss" : "ws";
+  const base =
+    env && typeof env === "string" && env.length > 0
+      ? env
+      : `${proto}://${window.location.hostname}:8081/ws/private-positions`;
+
   const url = new URL(base);
-
-  url.pathname = "/ws/private-positions";
   url.searchParams.set("mode", mode);
-
-  if (url.protocol === "http:") url.protocol = "ws:";
-  if (url.protocol === "https:") url.protocol = "wss:";
-
   return url.toString();
 }

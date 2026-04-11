@@ -1,7 +1,5 @@
 import { createHmac } from "node:crypto";
-import type { IncomingMessage } from "node:http";
-import type { Socket } from "node:net";
-import type { FastifyInstance, FastifyBaseLogger } from "fastify";
+import type { FastifyBaseLogger } from "fastify";
 import { WebSocketServer, WebSocket, type RawData } from "ws";
 
 type ExecutionMode = "demo" | "real";
@@ -47,24 +45,6 @@ function normalizeMode(value: unknown): ExecutionMode {
   return String(value ?? "").trim().toLowerCase() === "real" ? "real" : "demo";
 }
 
-function readModeFromRequest(request: IncomingMessage): ExecutionMode {
-  try {
-    const url = new URL(request.url ?? POSITIONS_WS_PATH, "http://localhost");
-    return normalizeMode(url.searchParams.get("mode"));
-  } catch {
-    return "demo";
-  }
-}
-
-function readPathnameFromRequest(request: IncomingMessage): string {
-  try {
-    const url = new URL(request.url ?? POSITIONS_WS_PATH, "http://localhost");
-    return url.pathname;
-  } catch {
-    return "";
-  }
-}
-
 function readNumber(value: unknown): number | null {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : null;
@@ -82,7 +62,9 @@ function toPositionKey(row: Record<string, unknown>): string {
   return `${symbol}:${positionIdx}:${side}`;
 }
 
-function normalizePositionRow(row: Record<string, unknown>): ExecutionPositionRow | null {
+function normalizePositionRow(
+  row: Record<string, unknown>,
+): ExecutionPositionRow | null {
   const symbol = String(row.symbol ?? "").trim().toUpperCase();
   const key = toPositionKey(row);
   const side = String(row.side ?? "").trim().toUpperCase();
@@ -325,7 +307,10 @@ class BybitPrivatePositionsStream {
   }
 }
 
-export function createPrivatePositionsWs(app: FastifyInstance) {
+export function createPrivatePositionsWs(app: {
+  addHook: (name: "onReady" | "onClose", hook: () => Promise<void>) => void;
+  log: FastifyBaseLogger;
+}) {
   const clients = new Map<WebSocket, ExecutionMode>();
   const realStream = new BybitPrivatePositionsStream(
     "real",
@@ -342,13 +327,14 @@ export function createPrivatePositionsWs(app: FastifyInstance) {
     process.env.BYBIT_DEMO_API_SECRET ?? "",
   );
 
-  const getStream = (mode: ExecutionMode) => (mode === "real" ? realStream : demoStream);
+  const getStream = (mode: ExecutionMode) =>
+    mode === "real" ? realStream : demoStream;
+
+  const host = process.env.POSITIONS_WS_HOST ?? process.env.HOST ?? "0.0.0.0";
+  const port = Math.max(1, Number(process.env.POSITIONS_WS_PORT ?? 8081) || 8081);
 
   let wss: WebSocketServer | null = null;
   let broadcastTimer: NodeJS.Timeout | null = null;
-  let upgradeHandler:
-    | ((request: IncomingMessage, socket: Socket, head: Buffer) => void)
-    | null = null;
 
   function broadcastSnapshots() {
     for (const [client, mode] of clients.entries()) {
@@ -360,27 +346,26 @@ export function createPrivatePositionsWs(app: FastifyInstance) {
   }
 
   app.addHook("onReady", async () => {
-    wss = new WebSocketServer({ noServer: true });
-
-    upgradeHandler = (request: IncomingMessage, socket: Socket, head: Buffer) => {
-      if (readPathnameFromRequest(request) !== POSITIONS_WS_PATH) return;
-      if (!wss) {
-        socket.destroy();
-        return;
-      }
-      wss.handleUpgrade(request, socket, head, (ws) => {
-        wss!.emit("connection", ws, request);
-      });
-    };
-
-    app.server.on("upgrade", upgradeHandler);
+    wss = new WebSocketServer({
+      host,
+      port,
+      path: POSITIONS_WS_PATH,
+    });
 
     broadcastTimer = setInterval(() => {
       broadcastSnapshots();
     }, CLIENT_BROADCAST_INTERVAL_MS);
 
     wss.on("connection", (ws, request) => {
-      const mode = readModeFromRequest(request);
+      const mode = (() => {
+        try {
+          const url = new URL(request.url ?? POSITIONS_WS_PATH, "http://localhost");
+          return normalizeMode(url.searchParams.get("mode"));
+        } catch {
+          return "demo";
+        }
+      })();
+
       clients.set(ws, mode);
       getStream(mode).ensureStarted();
 
@@ -398,7 +383,7 @@ export function createPrivatePositionsWs(app: FastifyInstance) {
       });
     });
 
-    app.log.info("private positions ws ready");
+    app.log.info({ host, port, path: POSITIONS_WS_PATH }, "private positions ws ready");
   });
 
   app.addHook("onClose", async () => {
@@ -408,11 +393,6 @@ export function createPrivatePositionsWs(app: FastifyInstance) {
     realStream.stop();
     demoStream.stop();
     clients.clear();
-
-    if (upgradeHandler) {
-      app.server.off("upgrade", upgradeHandler);
-      upgradeHandler = null;
-    }
 
     if (wss) {
       await new Promise<void>((resolve) => wss!.close(() => resolve()));
