@@ -16,8 +16,8 @@
     "cancelActivePositionOrders": true,
     "exit": "full"
   },
-  "running": true,
+  "running": false,
   "error": null,
-  "updatedAt": 1776015143415,
+  "updatedAt": 1776024289370,
   "positionStates": {}
 }
