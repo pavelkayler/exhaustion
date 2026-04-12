@@ -4,7 +4,7 @@
     "maxUsdt": 100,
     "leverage": 10,
     "tpPct": 3,
-    "slPct": 4,
+    "slPct": 6,
     "firstOrderOffsetPct": 0.6,
     "gridOrdersCount": 2,
     "gridStepPct": 1.2,
@@ -17,7 +17,7 @@
     "exit": "full"
   },
   "running": true,
-  "error": "BTCUSDT:2:Bybit demo REST error: /v5/position/trading-stop",
-  "updatedAt": 1776014574482,
+  "error": null,
+  "updatedAt": 1776015143415,
   "positionStates": {}
 }

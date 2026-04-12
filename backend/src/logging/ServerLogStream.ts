@@ -47,6 +47,11 @@ function buildLogFileName(bootSessionId: string, part: number): string {
   return `${bootSessionId}.part-${String(part).padStart(4, "0")}.jsonl`;
 }
 
+function shouldMirrorLogsToStdout(): boolean {
+  const raw = String(process.env.SERVER_LOG_STDOUT ?? "0").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
 export class ServerLogStream {
   public readonly bootSessionId: string;
 
@@ -54,6 +59,7 @@ export class ServerLogStream {
   private readonly maxFileBytes: number;
   private readonly now: () => number;
   private readonly stdoutWrite: (chunk: string) => void;
+  private readonly mirrorToStdout: boolean;
   private currentDayKey: string | null = null;
   private currentPart = 1;
   private currentFilePath: string | null = null;
@@ -67,12 +73,15 @@ export class ServerLogStream {
     this.stdoutWrite = options?.stdoutWrite ?? ((chunk) => {
       process.stdout.write(chunk);
     });
+    this.mirrorToStdout = shouldMirrorLogsToStdout();
   }
 
   write(chunk: string): void {
     const text = String(chunk ?? "");
     if (!text) return;
-    this.stdoutWrite(text);
+    if (this.mirrorToStdout) {
+      this.stdoutWrite(text);
+    }
     this.appendRawLine(text, this.now());
   }
 
@@ -105,7 +114,9 @@ export class ServerLogStream {
 
     const install = (method: ConsoleMethodName) => {
       console[method] = (...args: unknown[]) => {
-        original[method](...args);
+        if (this.mirrorToStdout) {
+          original[method](...args);
+        }
         this.appendRecord({
           ts: this.now(),
           source: "console",
@@ -157,4 +168,3 @@ export class ServerLogStream {
     return path.join(dir, buildLogFileName(this.bootSessionId, part));
   }
 }
-
