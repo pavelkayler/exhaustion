@@ -1,11 +1,18 @@
 Что исправлено
 
-- На execution-странице добавлен отдельный hook:
-  - frontend/src/pages/shortExecution/hooks/useExecutionMarketRefresh.ts
-- Он шлёт `rows_refresh_request("tick")` сразу при заходе на страницу и потом каждые 5 секунд.
-- `ShortExecutionPage.tsx` только подключает этот hook и остаётся orchestration-слоем.
+Причина бага:
+- execution-таблица брала market data из `rows`
+- но пересчёт был завязан только на ссылку `rows`
+- когда backend обновлял market state без новой ссылки на массив rows, `PnL` и `Value` не пересчитывались
+- timestamp в header тоже жил отдельно от market refresh и поэтому не обновлялся вместе с PnL
 
-Зачем:
-- PnL и Value в Positions считаются от market rows из основного ws feed.
-- Если backend сам не прислал свежий tick, execution page теперь принудительно запрашивает обновление раз в 5 секунд.
-- Это даёт ожидаемое обновление PnL без ручного изменения ордера/TP/SL на бирже.
+Что изменено:
+- `ShortExecutionPage.tsx` теперь передаёт в `ExecutionPositionsCard` ещё и `lastServerTime` как `marketUpdatedAt`
+- `ExecutionPositionsCard.tsx`:
+  - считает `effectiveUpdatedAt = max(updatedAt, marketUpdatedAt)`
+  - использует `marketUpdatedAt` в зависимостях `useMemo`
+  - поэтому пересчёт `PnL`/`Value` и надпись `updated` синхронизируются с каждым market refresh
+
+Что заменить:
+- frontend/src/pages/shortExecution/ShortExecutionPage.tsx
+- frontend/src/pages/shortExecution/components/ExecutionPositionsCard.tsx

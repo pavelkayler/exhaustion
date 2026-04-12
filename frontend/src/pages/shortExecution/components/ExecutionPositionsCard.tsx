@@ -18,6 +18,7 @@ type Props = {
   status: string;
   error: string | null;
   updatedAt: number | null;
+  marketUpdatedAt: number | null;
 };
 
 type DisplayPositionRow = ExecutionPositionRow & {
@@ -53,7 +54,13 @@ export function ExecutionPositionsCard({
   status,
   error,
   updatedAt,
+  marketUpdatedAt,
 }: Props) {
+  const effectiveUpdatedAt = Math.max(
+    Number(updatedAt ?? 0),
+    Number(marketUpdatedAt ?? 0),
+  ) || null;
+
   const marketPriceBySymbol = useMemo(() => {
     const out = new Map<string, number>();
     for (const row of rows) {
@@ -63,7 +70,7 @@ export function ExecutionPositionsCard({
       out.set(symbol, markPrice);
     }
     return out;
-  }, [rows]);
+  }, [rows, marketUpdatedAt]);
 
   const displayRows = useMemo<DisplayPositionRow[]>(() => {
     return positions.map((row) => {
@@ -83,13 +90,13 @@ export function ExecutionPositionsCard({
         }),
       };
     });
-  }, [marketPriceBySymbol, positions]);
+  }, [marketPriceBySymbol, positions, marketUpdatedAt]);
 
   return (
     <Card className="genesis-card">
       <Card.Header className="d-flex align-items-center justify-content-between gap-3 flex-wrap">
         <span>Positions</span>
-        <small className="text-secondary">updated: {formatUpdatedAt(updatedAt)}</small>
+        <small className="text-secondary">updated: {formatUpdatedAt(effectiveUpdatedAt)}</small>
       </Card.Header>
       <Card.Body className="p-0">
         <Table responsive hover className="mb-0" style={{ tableLayout: "fixed" }}>
