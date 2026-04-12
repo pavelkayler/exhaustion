@@ -1,3 +1,4 @@
+
 import { createHmac } from "node:crypto";
 import type { FastifyBaseLogger } from "fastify";
 import { WebSocketServer, WebSocket, type RawData } from "ws";
@@ -291,12 +292,23 @@ function normalizeOrderRow(
   const symbol = String(row.symbol ?? "").trim().toUpperCase();
   if (!symbol) return null;
 
+  const orderType = String(row.orderType ?? "").trim().toUpperCase();
+  const stopOrderType = String(row.stopOrderType ?? "").trim().toUpperCase();
+  const orderFilter = String(row.orderFilter ?? "").trim().toUpperCase();
+  const reduceOnly = String(row.reduceOnly ?? "").trim().toLowerCase();
+  const closeOnTrigger = String(row.closeOnTrigger ?? "").trim().toLowerCase();
+
+  if (orderType !== "LIMIT") return null;
+  if (stopOrderType.includes("TAKEPROFIT") || stopOrderType.includes("STOPLOSS")) return null;
+  if (orderFilter === "TPSLORDER") return null;
+  if (reduceOnly === "true" || reduceOnly === "1" || closeOnTrigger === "true" || closeOnTrigger === "1") return null;
+
   const key = toOrderKey(row);
   const entryPrice =
-    readPositiveNumber(row.triggerPrice)
-    ?? readPositiveNumber(row.price)
+    readPositiveNumber(row.price)
     ?? readPositiveNumber(row.orderPrice)
-    ?? readPositiveNumber(row.basePrice);
+    ?? readPositiveNumber(row.basePrice)
+    ?? readPositiveNumber(row.triggerPrice);
 
   const qty =
     readPositiveNumber(row.qty)
@@ -326,7 +338,7 @@ function normalizeOrderRow(
       ?? readNumber(row.updatedTime),
     updatedAt: readRowUpdatedAt(row, receivedAt),
     side: String(row.side ?? "").trim().toUpperCase() || null,
-    orderType: String(row.orderType ?? "").trim().toUpperCase() || null,
+    orderType,
   };
 }
 
@@ -595,65 +607,13 @@ class BybitPrivateExecutionStream {
   }
 
   private getDisplayOrders(): StoredOrderRow[] {
-    const orders = this.getVisibleWsOrders().slice();
-    const positions = this.getMergedPositions();
-
-    const hasSimilarOrder = (symbol: string, entryPrice: number | null) => {
-      if (entryPrice == null) return false;
-      return orders.some((order) => (
-        order.symbol === symbol
-        && order.entryPrice != null
-        && Math.abs(Number(order.entryPrice) - Number(entryPrice)) <= Math.max(Number(entryPrice) * 1e-6, 0.01)
-      ));
-    };
-
-    for (const position of positions) {
-      const size = Number(position.size ?? 0);
-      const leverage = Number(position.leverage ?? 0);
-      if (!Number.isFinite(size) || size <= 0) continue;
-
-      if (position.tp != null && !hasSimilarOrder(position.symbol, position.tp)) {
-        const value = Number(position.tp) * size;
-        orders.push({
-          key: `${position.key}:tp`,
-          symbol: position.symbol,
-          reason: position.reason,
-          value: Number.isFinite(value) ? value : null,
-          margin: leverage > 0 && Number.isFinite(value) ? value / leverage : null,
-          leverage: leverage > 0 ? leverage : null,
-          entryPrice: position.tp,
-          placedAt: position.updatedAt,
-          updatedAt: position.updatedAt ?? Date.now(),
-          side: position.side,
-          orderType: "TPSL",
-          isSynthetic: true,
-        });
-      }
-
-      if (position.sl != null && !hasSimilarOrder(position.symbol, position.sl)) {
-        const value = Number(position.sl) * size;
-        orders.push({
-          key: `${position.key}:sl`,
-          symbol: position.symbol,
-          reason: position.reason,
-          value: Number.isFinite(value) ? value : null,
-          margin: leverage > 0 && Number.isFinite(value) ? value / leverage : null,
-          leverage: leverage > 0 ? leverage : null,
-          entryPrice: position.sl,
-          placedAt: position.updatedAt,
-          updatedAt: position.updatedAt ?? Date.now(),
-          side: position.side,
-          orderType: "TPSL",
-          isSynthetic: true,
-        });
-      }
-    }
-
-    return orders.sort((left, right) => {
-      const symbolCmp = left.symbol.localeCompare(right.symbol);
-      if (symbolCmp !== 0) return symbolCmp;
-      return Number(left.placedAt ?? 0) - Number(right.placedAt ?? 0);
-    });
+    return this.getVisibleWsOrders()
+      .filter((row) => row.orderType === "LIMIT")
+      .sort((left, right) => {
+        const symbolCmp = left.symbol.localeCompare(right.symbol);
+        if (symbolCmp !== 0) return symbolCmp;
+        return Number(left.placedAt ?? 0) - Number(right.placedAt ?? 0);
+      });
   }
 
   private buildLeverageFallbackBySymbol(): Map<string, number | null> {
