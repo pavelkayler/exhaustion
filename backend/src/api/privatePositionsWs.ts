@@ -415,6 +415,38 @@ function computeSlPrice(entryPrice: number, side: string | null, slPct: number):
     : entryPrice * (1 - ratio);
 }
 
+function mergeStoredPositionRows(
+  primary: StoredPositionRow,
+  secondary: StoredPositionRow,
+): StoredPositionRow {
+  return {
+    ...primary,
+    reason: primary.reason ?? secondary.reason,
+    value: primary.value ?? secondary.value,
+    pnl: primary.pnl ?? secondary.pnl,
+    tp: primary.tp ?? secondary.tp,
+    sl: primary.sl ?? secondary.sl,
+    trailingStop: primary.trailingStop ?? secondary.trailingStop,
+    side: primary.side ?? secondary.side,
+    size: primary.size ?? secondary.size,
+    entryPrice: primary.entryPrice ?? secondary.entryPrice,
+    markPrice: primary.markPrice ?? secondary.markPrice,
+    positionIdx: primary.positionIdx ?? secondary.positionIdx,
+    leverage: primary.leverage ?? secondary.leverage,
+    updatedAt: Math.max(primary.updatedAt, secondary.updatedAt),
+  };
+}
+
+function resolvePositionIdx(position: StoredPositionRow): number {
+  if (Number.isFinite(position.positionIdx as number)) {
+    return Math.max(0, Math.floor(Number(position.positionIdx)));
+  }
+  const side = String(position.side ?? '').trim().toUpperCase();
+  if (side === 'BUY') return 1;
+  if (side === 'SELL') return 2;
+  return 0;
+}
+
 class BybitPrivateExecutionStream {
   private privateWs: WebSocket | null = null;
   private privateReconnectTimer: NodeJS.Timeout | null = null;
@@ -581,7 +613,13 @@ class BybitPrivateExecutionStream {
       const restAllowed = restRow != null && (deleteTs == null || restRow.updatedAt > deleteTs);
       const wsAllowed = wsRow != null && (deleteTs == null || wsRow.updatedAt > deleteTs);
 
-      if (wsAllowed && (!restAllowed || wsRow!.updatedAt >= restRow!.updatedAt)) {
+      if (restAllowed && wsAllowed) {
+        const primary = wsRow!.updatedAt >= restRow!.updatedAt ? wsRow! : restRow!;
+        const secondary = primary === wsRow ? restRow! : wsRow!;
+        visible.set(key, mergeStoredPositionRows(primary, secondary));
+        continue;
+      }
+      if (wsAllowed) {
         visible.set(key, wsRow!);
         continue;
       }
@@ -1067,66 +1105,90 @@ class PrivateExecutionExecutorManager {
     }
 
     const positions = stream.getPositionsDetailed().filter((row) => Number(row.size ?? 0) > 0);
+    const errors: string[] = [];
+
     for (const position of positions) {
       if (!Number.isFinite(position.entryPrice as number) || Number(position.entryPrice) <= 0) {
         continue;
       }
-      const positionIdx = position.positionIdx != null ? Math.floor(position.positionIdx) : 0;
-      const instrument = await this.getInstrumentSpec(settings.mode, restClient, position.symbol);
-      const targetTp = roundNearestToStep(
-        computeTpPrice(Number(position.entryPrice), position.side, settings.tpPct),
-        instrument.tickSize,
-      );
-      const targetSl = roundNearestToStep(
-        computeSlPrice(Number(position.entryPrice), position.side, settings.slPct),
-        instrument.tickSize,
-      );
 
-      if ((position.trailingStop ?? null) != null) {
-        this.logger.info(
-          { symbol: position.symbol, patch: { trailingStop: "0" } },
-          "private execution executor apply trading stop patch",
+      try {
+        const positionIdx = resolvePositionIdx(position);
+        const instrument = await this.getInstrumentSpec(settings.mode, restClient, position.symbol);
+        const targetTp = roundNearestToStep(
+          computeTpPrice(Number(position.entryPrice), position.side, settings.tpPct),
+          instrument.tickSize,
         );
-        await restClient.setTradingStopLinear({
-          symbol: position.symbol,
-          positionIdx,
-          trailingStop: "0",
-        });
-      }
-
-      if (!sameWithinStep(position.tp, targetTp, instrument.tickSize)) {
-        this.logger.info(
-          { symbol: position.symbol, patch: { tpslMode: "Full", takeProfit: formatForApi(targetTp), tpTriggerBy: "LastPrice" } },
-          "private execution executor apply trading stop patch",
+        const targetSl = roundNearestToStep(
+          computeSlPrice(Number(position.entryPrice), position.side, settings.slPct),
+          instrument.tickSize,
         );
-        await restClient.setTradingStopLinear({
-          symbol: position.symbol,
-          positionIdx,
-          tpslMode: "Full",
-          takeProfit: formatForApi(targetTp),
-          tpTriggerBy: "LastPrice",
-        });
-      }
 
-      if (!sameWithinStep(position.sl, targetSl, instrument.tickSize)) {
-        this.logger.info(
-          { symbol: position.symbol, patch: { tpslMode: "Full", stopLoss: formatForApi(targetSl), slTriggerBy: "LastPrice" } },
-          "private execution executor apply trading stop patch",
+        if ((position.trailingStop ?? null) != null) {
+          this.logger.info(
+            { symbol: position.symbol, positionIdx, patch: { trailingStop: "0" } },
+            "private execution executor apply trading stop patch",
+          );
+          await restClient.setTradingStopLinear({
+            symbol: position.symbol,
+            positionIdx,
+            trailingStop: "0",
+          });
+        }
+
+        if (!sameWithinStep(position.tp, targetTp, instrument.tickSize)) {
+          this.logger.info(
+            { symbol: position.symbol, positionIdx, patch: { tpslMode: "Full", takeProfit: formatForApi(targetTp), tpTriggerBy: "LastPrice" } },
+            "private execution executor apply trading stop patch",
+          );
+          await restClient.setTradingStopLinear({
+            symbol: position.symbol,
+            positionIdx,
+            tpslMode: "Full",
+            takeProfit: formatForApi(targetTp),
+            tpTriggerBy: "LastPrice",
+          });
+        }
+
+        if (!sameWithinStep(position.sl, targetSl, instrument.tickSize)) {
+          this.logger.info(
+            { symbol: position.symbol, positionIdx, patch: { tpslMode: "Full", stopLoss: formatForApi(targetSl), slTriggerBy: "LastPrice" } },
+            "private execution executor apply trading stop patch",
+          );
+          await restClient.setTradingStopLinear({
+            symbol: position.symbol,
+            positionIdx,
+            tpslMode: "Full",
+            stopLoss: formatForApi(targetSl),
+            slTriggerBy: "LastPrice",
+          });
+        }
+
+        stream.applyOptimisticProtection(position.key, {
+          tp: targetTp,
+          sl: targetSl,
+          trailingStop: null,
+        });
+      } catch (error) {
+        const message = String((error as Error)?.message ?? error);
+        errors.push(`${position.symbol}:${resolvePositionIdx(position)}:${message}`);
+        this.logger.error(
+          {
+            symbol: position.symbol,
+            side: position.side,
+            positionIdx: resolvePositionIdx(position),
+            entryPrice: position.entryPrice,
+            tp: position.tp,
+            sl: position.sl,
+            error: message,
+          },
+          "private execution executor position reconcile failed",
         );
-        await restClient.setTradingStopLinear({
-          symbol: position.symbol,
-          positionIdx,
-          tpslMode: "Full",
-          stopLoss: formatForApi(targetSl),
-          slTriggerBy: "LastPrice",
-        });
       }
+    }
 
-      stream.applyOptimisticProtection(position.key, {
-        tp: targetTp,
-        sl: targetSl,
-        trailingStop: null,
-      });
+    if (errors.length > 0 && errors.length === positions.length) {
+      throw new Error(errors.join(" | "));
     }
   }
 
