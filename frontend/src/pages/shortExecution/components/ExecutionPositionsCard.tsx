@@ -1,4 +1,5 @@
 import { Card, Table } from "react-bootstrap";
+import type { SymbolRow } from "../../../shared/types/domain";
 import type { ExecutionPositionRow } from "../../../features/positions/hooks/usePrivatePositionsFeed";
 import {
   computeTargetPct,
@@ -9,12 +10,15 @@ import {
   renderExecutionFeedMessage,
   rowVariantClass,
 } from "./executionUi";
+import { useExecutionProjectedPositions } from "../hooks/useExecutionProjectedPositions";
 
 type Props = {
   positions: ExecutionPositionRow[];
   status: string;
   error: string | null;
   updatedAt: number | null;
+  marketRows: SymbolRow[];
+  marketUpdatedAt: number | null;
 };
 
 export function ExecutionPositionsCard({
@@ -22,12 +26,21 @@ export function ExecutionPositionsCard({
   status,
   error,
   updatedAt,
+  marketRows,
+  marketUpdatedAt,
 }: Props) {
+  const { projectedRows, displayUpdatedAt } = useExecutionProjectedPositions({
+    positions,
+    marketRows,
+    marketUpdatedAt,
+    feedUpdatedAt: updatedAt,
+  });
+
   return (
     <Card className="genesis-card">
       <Card.Header className="d-flex align-items-center justify-content-between gap-3 flex-wrap">
         <span>Positions</span>
-        <small className="text-secondary">updated: {formatUpdatedAt(updatedAt)}</small>
+        <small className="text-secondary">updated: {formatUpdatedAt(displayUpdatedAt)}</small>
       </Card.Header>
       <Card.Body className="p-0">
         <Table responsive hover className="mb-0" style={{ tableLayout: "fixed" }}>
@@ -50,19 +63,19 @@ export function ExecutionPositionsCard({
             </tr>
           </thead>
           <tbody>
-            {positions.map((row) => (
+            {projectedRows.map((row) => (
               <tr key={row.key}>
                 <td>{row.symbol}</td>
                 <td>{normalizeReason(row.reason)}</td>
-                <td>{formatCurrencyRight(row.value, 2)}</td>
-                <td className={rowVariantClass(row)}>
-                  {formatCurrencyRight(row.pnl, 2)}
+                <td>{formatCurrencyRight(row.displayValue, 2)}</td>
+                <td className={rowVariantClass({ pnl: row.displayPnl })}>
+                  {formatCurrencyRight(row.displayPnl, 2)}
                 </td>
                 <td>{formatPercent(computeTargetPct(row.tp, row.entryPrice), 2)}</td>
                 <td>{formatPercent(computeTargetPct(row.sl, row.entryPrice), 2)}</td>
               </tr>
             ))}
-            {positions.length === 0 ? (
+            {projectedRows.length === 0 ? (
               <tr>
                 <td colSpan={6} className="text-center text-secondary py-4">
                   {renderExecutionFeedMessage("positions", status, error)}

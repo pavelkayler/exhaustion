@@ -57,12 +57,8 @@ type ServerMessage =
   | { type: "execution_snapshot"; payload: PositionsSnapshot }
   | { type: "error"; message: string };
 
-type PositionsSeedClient = {
+type OrdersSeedClient = {
   hasCredentials(): boolean;
-  getPositionsLinear(params?: {
-    symbol?: string;
-    settleCoin?: string;
-  }): Promise<{ list: Array<Record<string, unknown>> }>;
   getOpenOrdersLinear(params?: {
     symbol?: string;
     settleCoin?: string;
@@ -78,8 +74,10 @@ type StoredPositionRow = ExecutionPositionRow & {
 const POSITIONS_WS_PATH = "/ws/private-positions";
 const PRIVATE_WS_PING_INTERVAL_MS = 20_000;
 const CLIENT_BROADCAST_INTERVAL_MS = 1_000;
-const PUBLIC_REAL_WS_URL = "wss://stream.bybit.com/v5/public/linear";
-const PUBLIC_DEMO_WS_URL = "wss://stream-demo.bybit.com/v5/public/linear";
+const POSITION_RESUBSCRIBE_INTERVAL_MS = 60_000;
+const POSITION_RESUBSCRIBE_TIMEOUT_MS = 8_000;
+const POSITION_RESUBSCRIBE_ESCALATE_MS = 5 * 60_000;
+const POSITION_REFRESH_GUARD_INTERVAL_MS = 1_000;
 
 function normalizeMode(value: unknown): ExecutionMode {
   return String(value ?? "").trim().toLowerCase() === "real" ? "real" : "demo";
@@ -133,7 +131,10 @@ function toOrderKey(row: Record<string, unknown>): string {
   return `${symbol}:${String(row.createdTime ?? row.updatedTime ?? Date.now())}`;
 }
 
-function normalizePositionRow(row: Record<string, unknown>): StoredPositionRow | null {
+function normalizePositionRow(
+  row: Record<string, unknown>,
+  receivedAt: number,
+): StoredPositionRow | null {
   const symbol = String(row.symbol ?? "").trim().toUpperCase();
   const key = toPositionKey(row);
   const side = String(row.side ?? "").trim().toUpperCase();
@@ -155,7 +156,7 @@ function normalizePositionRow(row: Record<string, unknown>): StoredPositionRow |
     size,
     entryPrice: readPositiveNumber(row.avgPrice),
     markPrice: readPositiveNumber(row.markPrice),
-    updatedAt: readNumber(row.updatedTime) ?? Date.now(),
+    updatedAt: receivedAt,
     leverage: readPositiveNumber(row.leverage),
   };
 }
@@ -181,6 +182,7 @@ function isLimitOrderType(value: unknown): boolean {
 function normalizeOrderRow(
   row: Record<string, unknown>,
   leverageFallbackBySymbol: Map<string, number | null>,
+  receivedAt: number,
 ): ExecutionOrderRow | null {
   if (!isActiveOrderStatus(row.orderStatus)) return null;
   if (!isLimitOrderType(row.orderType)) return null;
@@ -228,41 +230,8 @@ function normalizeOrderRow(
       readNumber(row.createdAt) ??
       readNumber(row.placeTime) ??
       readNumber(row.updatedTime),
-    updatedAt: readNumber(row.updatedTime) ?? Date.now(),
+    updatedAt: receivedAt,
   };
-}
-
-function computePositionValue(
-  currentPrice: number | null,
-  size: number | null,
-  fallback: number | null,
-): number | null {
-  if ((currentPrice ?? 0) > 0 && (size ?? 0) > 0) {
-    return Number(currentPrice) * Number(size);
-  }
-  return fallback;
-}
-
-function computePositionPnl(args: {
-  side: string | null;
-  size: number | null;
-  entryPrice: number | null;
-  currentPrice: number | null;
-  fallback: number | null;
-}): number | null {
-  const size = Number(args.size);
-  const entryPrice = Number(args.entryPrice);
-  const currentPrice = Number(args.currentPrice);
-  const side = String(args.side ?? "").trim().toUpperCase();
-
-  if (!(size > 0) || !(entryPrice > 0) || !(currentPrice > 0)) {
-    return args.fallback;
-  }
-
-  if (side === "SELL") return (entryPrice - currentPrice) * size;
-  if (side === "BUY") return (currentPrice - entryPrice) * size;
-
-  return args.fallback;
 }
 
 function safeSend(ws: WebSocket, body: ServerMessage): void {
@@ -291,15 +260,10 @@ class BybitPrivateExecutionStream {
   private privateWs: WebSocket | null = null;
   private privateReconnectTimer: NodeJS.Timeout | null = null;
   private privatePingTimer: NodeJS.Timeout | null = null;
+  private refreshGuardTimer: NodeJS.Timeout | null = null;
+  private positionRefreshTimeoutTimer: NodeJS.Timeout | null = null;
   private privateReconnectAttempt = 0;
-
-  private publicWs: WebSocket | null = null;
-  private publicReconnectTimer: NodeJS.Timeout | null = null;
-  private publicReconnectAttempt = 0;
-  private publicSymbolsKey = "";
-
-  private reconcileTimer: NodeJS.Timeout | null = null;
-  private lastSeedStartedAt = 0;
+  private initialPrivateSubscribeDone = false;
 
   private shouldRun = false;
   private status: FeedStatus;
@@ -307,18 +271,20 @@ class BybitPrivateExecutionStream {
   private error: string | null = null;
   private positions = new Map<string, StoredPositionRow>();
   private orders = new Map<string, ExecutionOrderRow>();
-  private marketPrices = new Map<string, number>();
-  private marketUpdatedAt: number | null = null;
-  private seedInFlight = false;
+
+  private lastPositionFrameAt: number | null = null;
+  private positionRefreshCycleStartedAt: number | null = null;
+  private positionRefreshAttemptStartedAt: number | null = null;
+  private positionRefreshFailureCount = 0;
+  private positionResubscribeInFlight = false;
 
   constructor(
     private readonly mode: ExecutionMode,
     private readonly logger: FastifyBaseLogger,
     private readonly privateWsUrl: string,
-    private readonly publicWsUrl: string,
     private readonly apiKey: string,
     private readonly apiSecret: string,
-    private readonly seedClient: PositionsSeedClient | null,
+    private readonly ordersSeedClient: OrdersSeedClient | null,
   ) {
     this.status = this.hasCredentials() ? "connecting" : "missing_credentials";
   }
@@ -328,35 +294,11 @@ class BybitPrivateExecutionStream {
   }
 
   getSnapshot(): PositionsSnapshot {
-    const positions = Array.from(this.positions.values())
-      .map((row): ExecutionPositionRow => {
-        const currentPrice = this.marketPrices.get(row.symbol) ?? row.markPrice ?? null;
-        return {
-          key: row.key,
-          symbol: row.symbol,
-          reason: row.reason,
-          value: computePositionValue(currentPrice, row.size, row.value),
-          pnl: computePositionPnl({
-            side: row.side,
-            size: row.size,
-            entryPrice: row.entryPrice,
-            currentPrice,
-            fallback: row.pnl,
-          }),
-          tp: row.tp,
-          sl: row.sl,
-          side: row.side,
-          size: row.size,
-          entryPrice: row.entryPrice,
-          markPrice: currentPrice,
-          updatedAt: row.updatedAt,
-        };
-      })
-      .sort((left, right) => {
-        const symbolCmp = left.symbol.localeCompare(right.symbol);
-        if (symbolCmp !== 0) return symbolCmp;
-        return left.key.localeCompare(right.key);
-      });
+    const positions = Array.from(this.positions.values()).sort((left, right) => {
+      const symbolCmp = left.symbol.localeCompare(right.symbol);
+      if (symbolCmp !== 0) return symbolCmp;
+      return left.key.localeCompare(right.key);
+    });
 
     const orders = Array.from(this.orders.values()).sort((left, right) => {
       const symbolCmp = left.symbol.localeCompare(right.symbol);
@@ -367,10 +309,7 @@ class BybitPrivateExecutionStream {
     return {
       mode: this.mode,
       status: this.status,
-      updatedAt: Math.max(
-        Number(this.updatedAt ?? 0),
-        Number(this.marketUpdatedAt ?? 0),
-      ) || null,
+      updatedAt: this.updatedAt,
       error: this.error,
       positions,
       orders,
@@ -385,7 +324,8 @@ class BybitPrivateExecutionStream {
     }
     if (this.shouldRun) return;
     this.shouldRun = true;
-    void this.seedFromRest("ensure_started");
+    this.startRefreshGuard();
+    void this.seedOrdersFromRest("ensure_started");
     this.connectPrivate();
   }
 
@@ -394,89 +334,102 @@ class BybitPrivateExecutionStream {
 
     if (this.privateReconnectTimer) clearTimeout(this.privateReconnectTimer);
     if (this.privatePingTimer) clearInterval(this.privatePingTimer);
-    if (this.publicReconnectTimer) clearTimeout(this.publicReconnectTimer);
-    if (this.reconcileTimer) clearTimeout(this.reconcileTimer);
+    if (this.refreshGuardTimer) clearInterval(this.refreshGuardTimer);
+    if (this.positionRefreshTimeoutTimer) clearTimeout(this.positionRefreshTimeoutTimer);
 
     this.privateReconnectTimer = null;
     this.privatePingTimer = null;
-    this.publicReconnectTimer = null;
-    this.reconcileTimer = null;
+    this.refreshGuardTimer = null;
+    this.positionRefreshTimeoutTimer = null;
+
+    this.positionRefreshAttemptStartedAt = null;
+    this.positionRefreshFailureCount = 0;
+    this.positionResubscribeInFlight = false;
 
     try {
       this.privateWs?.close();
     } catch {}
-    try {
-      this.publicWs?.close();
-    } catch {}
 
     this.privateWs = null;
-    this.publicWs = null;
-    this.publicSymbolsKey = "";
   }
 
-  private scheduleSeedFromRest(reason: string, delayMs = 250): void {
-    if (!this.shouldRun || !this.seedClient || !this.seedClient.hasCredentials()) return;
-
-    const now = Date.now();
-    const minDelay = Math.max(0, 1_000 - (now - this.lastSeedStartedAt));
-    const nextDelay = Math.max(delayMs, minDelay);
-
-    if (this.reconcileTimer) clearTimeout(this.reconcileTimer);
-    this.reconcileTimer = setTimeout(() => {
-      this.reconcileTimer = null;
-      void this.seedFromRest(reason);
-    }, nextDelay);
+  private startRefreshGuard(): void {
+    if (this.refreshGuardTimer) clearInterval(this.refreshGuardTimer);
+    this.refreshGuardTimer = setInterval(() => {
+      this.tickPositionRefreshGuard();
+    }, POSITION_REFRESH_GUARD_INTERVAL_MS);
   }
 
-  private async seedFromRest(reason: string): Promise<void> {
+  private tickPositionRefreshGuard(): void {
     if (!this.shouldRun) return;
-    if (!this.seedClient || !this.seedClient.hasCredentials()) return;
-    if (this.seedInFlight) return;
+    if (!this.privateWs || this.privateWs.readyState !== WebSocket.OPEN) return;
+    if (this.status !== "connected") return;
+    if (this.positionResubscribeInFlight) return;
 
-    this.seedInFlight = true;
-    this.lastSeedStartedAt = Date.now();
+    const baseAt = this.lastPositionFrameAt ?? this.positionRefreshCycleStartedAt;
+    if (!(Number(baseAt) > 0)) return;
+
+    const elapsedMs = Date.now() - Number(baseAt);
+    if (elapsedMs < POSITION_RESUBSCRIBE_INTERVAL_MS) return;
+
+    const minutesSinceBase = Math.floor(elapsedMs / POSITION_RESUBSCRIBE_INTERVAL_MS);
+
+    if (
+      minutesSinceBase >= 5 &&
+      this.positionRefreshFailureCount >= 4
+    ) {
+      this.logger.warn(
+        {
+          mode: this.mode,
+          minutesSinceBase,
+          failures: this.positionRefreshFailureCount,
+        },
+        "position refresh escalation: full private ws reconnect",
+      );
+      this.forcePrivateReconnect("position_refresh_5m_escalation");
+      return;
+    }
+
+    if (minutesSinceBase >= this.positionRefreshFailureCount + 1) {
+      this.requestPositionResubscribe(`position_refresh_m${minutesSinceBase}`);
+    }
+  }
+
+  private async seedOrdersFromRest(reason: string): Promise<void> {
+    if (!this.shouldRun) return;
+    if (!this.ordersSeedClient || !this.ordersSeedClient.hasCredentials()) return;
 
     try {
-      const [positionsResp, ordersResp] = await Promise.all([
-        this.seedClient.getPositionsLinear({ settleCoin: "USDT" }),
-        this.seedClient.getOpenOrdersLinear({ settleCoin: "USDT", limit: 50 }),
-      ]);
-
-      const nextPositions = new Map<string, StoredPositionRow>();
-      for (const item of Array.isArray(positionsResp?.list) ? positionsResp.list : []) {
-        if (!item || typeof item !== "object") continue;
-        const normalized = normalizePositionRow(item);
-        if (!normalized) continue;
-        nextPositions.set(normalized.key, normalized);
-      }
+      const response = await this.ordersSeedClient.getOpenOrdersLinear({
+        settleCoin: "USDT",
+        limit: 50,
+      });
 
       const leverageFallbackBySymbol = new Map<string, number | null>();
-      for (const position of nextPositions.values()) {
+      for (const position of this.positions.values()) {
         leverageFallbackBySymbol.set(position.symbol, position.leverage);
       }
 
+      const receivedAt = Date.now();
       const nextOrders = new Map<string, ExecutionOrderRow>();
-      for (const item of Array.isArray(ordersResp?.list) ? ordersResp.list : []) {
+      for (const item of Array.isArray(response?.list) ? response.list : []) {
         if (!item || typeof item !== "object") continue;
-        const normalized = normalizeOrderRow(item, leverageFallbackBySymbol);
+        const normalized = normalizeOrderRow(item, leverageFallbackBySymbol, receivedAt);
         if (!normalized) continue;
         nextOrders.set(normalized.key, normalized);
       }
 
-      this.positions = nextPositions;
       this.orders = nextOrders;
-      this.updatedAt = Date.now();
+      this.updatedAt = receivedAt;
       this.error = null;
-      this.syncPublicTickerSocket();
 
       this.logger.info(
         {
           mode: this.mode,
           reason,
-          positions: nextPositions.size,
           orders: nextOrders.size,
         },
-        "private execution seed synced",
+        "private execution orders seeded",
       );
     } catch (error) {
       this.logger.warn(
@@ -485,21 +438,174 @@ class BybitPrivateExecutionStream {
           reason,
           error: String((error as Error)?.message ?? error),
         },
-        "private execution seed failed",
+        "private execution orders seed failed",
       );
-    } finally {
-      this.seedInFlight = false;
+    }
+  }
+
+  private requestPositionResubscribe(reason: string): void {
+    if (!this.privateWs || this.privateWs.readyState !== WebSocket.OPEN) return;
+    if (this.positionResubscribeInFlight) return;
+
+    this.positionResubscribeInFlight = true;
+    this.positionRefreshAttemptStartedAt = Date.now();
+
+    if (this.positionRefreshTimeoutTimer) clearTimeout(this.positionRefreshTimeoutTimer);
+    this.positionRefreshTimeoutTimer = setTimeout(() => {
+      this.positionRefreshTimeoutTimer = null;
+      this.markPositionRefreshFailure(`${reason}:timeout`);
+    }, POSITION_RESUBSCRIBE_TIMEOUT_MS);
+
+    this.logger.info(
+      {
+        mode: this.mode,
+        reason,
+        failures: this.positionRefreshFailureCount,
+      },
+      "position refresh resubscribe requested",
+    );
+
+    try {
+      this.privateWs.send(JSON.stringify({ op: "unsubscribe", args: ["position"] }));
+    } catch {}
+
+    setTimeout(() => {
+      if (!this.privateWs || this.privateWs.readyState !== WebSocket.OPEN) return;
+      try {
+        this.privateWs.send(JSON.stringify({ op: "subscribe", args: ["position"] }));
+      } catch {}
+    }, 150);
+  }
+
+  private markPositionRefreshSuccess(receivedAt: number): void {
+    this.lastPositionFrameAt = receivedAt;
+    this.positionRefreshCycleStartedAt = receivedAt;
+    this.positionRefreshFailureCount = 0;
+    this.positionResubscribeInFlight = false;
+    if (this.positionRefreshTimeoutTimer) clearTimeout(this.positionRefreshTimeoutTimer);
+    this.positionRefreshTimeoutTimer = null;
+    this.positionRefreshAttemptStartedAt = null;
+  }
+
+  private markPositionRefreshFailure(reason: string): void {
+    if (!this.positionResubscribeInFlight) return;
+
+    this.positionResubscribeInFlight = false;
+    this.positionRefreshAttemptStartedAt = null;
+    if (this.positionRefreshTimeoutTimer) clearTimeout(this.positionRefreshTimeoutTimer);
+    this.positionRefreshTimeoutTimer = null;
+    this.positionRefreshFailureCount += 1;
+
+    this.logger.warn(
+      {
+        mode: this.mode,
+        reason,
+        failures: this.positionRefreshFailureCount,
+        lastPositionFrameAt: this.lastPositionFrameAt,
+      },
+      "position refresh resubscribe failed",
+    );
+  }
+
+  private forcePrivateReconnect(reason: string): void {
+    this.positionResubscribeInFlight = false;
+    this.positionRefreshAttemptStartedAt = null;
+    if (this.positionRefreshTimeoutTimer) clearTimeout(this.positionRefreshTimeoutTimer);
+    this.positionRefreshTimeoutTimer = null;
+
+    const socket = this.privateWs;
+    this.privateWs = null;
+    this.initialPrivateSubscribeDone = false;
+    this.status = "reconnecting";
+
+    try {
+      socket?.close();
+    } catch {}
+
+    if (this.privateReconnectTimer) clearTimeout(this.privateReconnectTimer);
+    this.privateReconnectTimer = setTimeout(() => {
+      this.privateReconnectTimer = null;
+      if (!this.shouldRun) return;
+      this.connectPrivate();
+    }, 250);
+
+    this.logger.warn({ mode: this.mode, reason }, "forcing private ws reconnect");
+  }
+
+  private handlePositionFrame(data: unknown): void {
+    const receivedAt = Date.now();
+    const items = parseMessageItems(data);
+    let mutated = false;
+
+    if (Array.isArray(data) && data.length === 0) {
+      if (this.positions.size > 0) {
+        this.positions.clear();
+        mutated = true;
+      }
+    } else {
+      for (const item of items) {
+        const normalized = normalizePositionRow(item, receivedAt);
+        const key = toPositionKey(item);
+
+        if (!normalized) {
+          if (this.positions.delete(key)) mutated = true;
+          continue;
+        }
+
+        this.positions.set(key, normalized);
+        mutated = true;
+      }
+    }
+
+    this.markPositionRefreshSuccess(receivedAt);
+    this.updatedAt = receivedAt;
+    this.status = "connected";
+    this.error = null;
+
+    if (!mutated && Array.isArray(data) && data.length === 0) {
+      this.logger.info({ mode: this.mode }, "position refresh confirmed: no open positions");
+    }
+  }
+
+  private handleOrderFrame(data: unknown): void {
+    const receivedAt = Date.now();
+    let mutated = false;
+
+    const leverageFallbackBySymbol = new Map<string, number | null>();
+    for (const position of this.positions.values()) {
+      leverageFallbackBySymbol.set(position.symbol, position.leverage);
+    }
+
+    for (const item of parseMessageItems(data)) {
+      const normalized = normalizeOrderRow(item, leverageFallbackBySymbol, receivedAt);
+      const key = toOrderKey(item);
+
+      if (!normalized) {
+        if (this.orders.delete(key)) mutated = true;
+        continue;
+      }
+
+      this.orders.set(key, normalized);
+      mutated = true;
+    }
+
+    if (mutated) {
+      this.updatedAt = receivedAt;
+      this.status = "connected";
+      this.error = null;
     }
   }
 
   private connectPrivate(): void {
     if (!this.shouldRun || !this.hasCredentials()) return;
 
-    this.positions.clear();
-    this.orders.clear();
-    this.updatedAt = null;
-    this.error = null;
     this.status = this.privateReconnectAttempt > 0 ? "reconnecting" : "connecting";
+    this.error = null;
+    this.initialPrivateSubscribeDone = false;
+    this.positionResubscribeInFlight = false;
+    this.positionRefreshAttemptStartedAt = null;
+    if (this.positionRefreshTimeoutTimer) clearTimeout(this.positionRefreshTimeoutTimer);
+    this.positionRefreshTimeoutTimer = null;
 
     const socket = new WebSocket(this.privateWsUrl);
     this.privateWs = socket;
@@ -543,7 +649,12 @@ class BybitPrivateExecutionStream {
           if (msg.success === true) {
             this.status = "subscribing";
             this.error = null;
-            socket.send(JSON.stringify({ op: "subscribe", args: ["position", "order", "execution"] }));
+            socket.send(
+              JSON.stringify({
+                op: "subscribe",
+                args: ["position", "order", "execution"],
+              }),
+            );
             return;
           }
 
@@ -555,15 +666,33 @@ class BybitPrivateExecutionStream {
 
         if (msg.op === "subscribe") {
           if (msg.success === true) {
-            this.status = "connected";
-            this.error = null;
-            void this.seedFromRest("subscribe_ok");
+            if (!this.initialPrivateSubscribeDone) {
+              this.initialPrivateSubscribeDone = true;
+              this.status = "connected";
+              this.error = null;
+              this.positionRefreshCycleStartedAt = Date.now();
+              void this.seedOrdersFromRest("subscribe_ok");
+              this.requestPositionResubscribe("subscribe_ok_bootstrap");
+            } else if (this.positionResubscribeInFlight) {
+              this.status = "connected";
+              this.error = null;
+            }
             return;
           }
 
           this.status = "error";
           this.error = String(msg.ret_msg ?? "subscribe_failed");
           this.logger.error({ mode: this.mode, msg }, "private execution subscribe failed");
+          if (this.positionResubscribeInFlight) {
+            this.markPositionRefreshFailure("position_resubscribe_nack");
+          }
+          return;
+        }
+
+        if (msg.op === "unsubscribe") {
+          if (msg.success !== true && this.positionResubscribeInFlight) {
+            this.markPositionRefreshFailure("position_unsubscribe_nack");
+          }
           return;
         }
 
@@ -572,75 +701,20 @@ class BybitPrivateExecutionStream {
         }
 
         if (msg.topic === "position") {
-          let mutated = false;
-
-          for (const item of parseMessageItems(msg.data)) {
-            const normalized = normalizePositionRow(item);
-            const key = toPositionKey(item);
-
-            if (!normalized) {
-              if (this.positions.delete(key)) mutated = true;
-              continue;
-            }
-
-            this.positions.set(key, normalized);
-            mutated = true;
-          }
-
-          if (mutated) {
-            this.updatedAt = Date.now();
-            this.status = "connected";
-            this.error = null;
-            this.syncPublicTickerSocket();
-          }
+          this.handlePositionFrame(msg.data);
           return;
         }
 
         if (msg.topic === "order") {
-          let mutated = false;
-          let needsReconcile = false;
-
-          const leverageFallbackBySymbol = new Map<string, number | null>();
-          for (const position of this.positions.values()) {
-            leverageFallbackBySymbol.set(position.symbol, position.leverage);
-          }
-
-          for (const item of parseMessageItems(msg.data)) {
-            const normalized = normalizeOrderRow(item, leverageFallbackBySymbol);
-            const key = toOrderKey(item);
-
-            if (!normalized) {
-              if (this.orders.delete(key)) mutated = true;
-              needsReconcile = true;
-              continue;
-            }
-
-            this.orders.set(key, normalized);
-            mutated = true;
-
-            if (!isActiveOrderStatus(item.orderStatus)) {
-              needsReconcile = true;
-            }
-          }
-
-          if (mutated) {
-            this.updatedAt = Date.now();
-            this.status = "connected";
-            this.error = null;
-            this.syncPublicTickerSocket();
-          }
-
-          if (needsReconcile) {
-            this.scheduleSeedFromRest("order_state_change", 250);
-          }
+          this.handleOrderFrame(msg.data);
           return;
         }
 
         if (msg.topic === "execution") {
-          this.updatedAt = Date.now();
+          const receivedAt = Date.now();
+          this.updatedAt = receivedAt;
           this.status = "connected";
           this.error = null;
-          this.scheduleSeedFromRest("execution_event", 250);
           return;
         }
       } catch (error) {
@@ -681,114 +755,8 @@ class BybitPrivateExecutionStream {
     if (this.privateReconnectTimer) clearTimeout(this.privateReconnectTimer);
     this.privateReconnectTimer = setTimeout(() => {
       this.privateReconnectTimer = null;
+      if (!this.shouldRun) return;
       this.connectPrivate();
-    }, delayMs);
-  }
-
-  private getTrackedSymbols(): string[] {
-    const out = new Set<string>();
-    for (const row of this.positions.values()) out.add(row.symbol);
-    for (const row of this.orders.values()) out.add(row.symbol);
-    return Array.from(out).sort();
-  }
-
-  private syncPublicTickerSocket(): void {
-    const symbols = this.getTrackedSymbols();
-    const nextKey = symbols.join(",");
-
-    if (!nextKey) {
-      this.publicSymbolsKey = "";
-      this.marketPrices.clear();
-      try {
-        this.publicWs?.close();
-      } catch {}
-      this.publicWs = null;
-      return;
-    }
-
-    if (
-      this.publicWs &&
-      (this.publicWs.readyState === WebSocket.OPEN ||
-        this.publicWs.readyState === WebSocket.CONNECTING) &&
-      this.publicSymbolsKey === nextKey
-    ) {
-      return;
-    }
-
-    this.publicSymbolsKey = nextKey;
-
-    try {
-      this.publicWs?.close();
-    } catch {}
-    this.publicWs = null;
-
-    this.connectPublicTickerSocket(symbols);
-  }
-
-  private connectPublicTickerSocket(symbols: string[]): void {
-    if (!this.shouldRun || symbols.length === 0) return;
-
-    const socket = new WebSocket(this.publicWsUrl);
-    this.publicWs = socket;
-
-    socket.on("open", () => {
-      if (this.publicWs !== socket) return;
-      this.publicReconnectAttempt = 0;
-      const args = symbols.map((symbol) => `tickers.${symbol}`);
-      socket.send(JSON.stringify({ op: "subscribe", args }));
-    });
-
-    socket.on("message", (buffer: RawData) => {
-      if (this.publicWs !== socket) return;
-      const raw = typeof buffer === "string" ? buffer : buffer.toString("utf8");
-
-      try {
-        const msg = JSON.parse(raw) as Record<string, unknown>;
-        const topic = String(msg.topic ?? "");
-        if (!topic.startsWith("tickers.")) return;
-
-        const symbol = topic.slice("tickers.".length).trim().toUpperCase();
-        if (!symbol) return;
-
-        const payload =
-          msg.data && typeof msg.data === "object" ? (msg.data as Record<string, unknown>) : {};
-
-        const currentPrice =
-          readPositiveNumber(payload.markPrice) ??
-          readPositiveNumber(payload.lastPrice) ??
-          readPositiveNumber(payload.indexPrice);
-
-        if (currentPrice != null) {
-          this.marketPrices.set(symbol, currentPrice);
-          this.marketUpdatedAt = Date.now();
-        }
-      } catch {}
-    });
-
-    socket.on("close", () => {
-      if (this.publicWs !== socket) return;
-      this.publicWs = null;
-      this.schedulePublicReconnect();
-    });
-
-    socket.on("error", () => {
-      try {
-        socket.close();
-      } catch {}
-    });
-  }
-
-  private schedulePublicReconnect(): void {
-    if (!this.shouldRun || !this.publicSymbolsKey) return;
-
-    this.publicReconnectAttempt += 1;
-    const delayMs = Math.min(10_000, 1_000 * this.publicReconnectAttempt);
-
-    if (this.publicReconnectTimer) clearTimeout(this.publicReconnectTimer);
-    this.publicReconnectTimer = setTimeout(() => {
-      this.publicReconnectTimer = null;
-      const symbols = this.publicSymbolsKey.split(",").filter(Boolean);
-      this.connectPublicTickerSocket(symbols);
     }, delayMs);
   }
 }
@@ -799,27 +767,25 @@ export function createPrivatePositionsWs(app: {
 }) {
   const clients = new Map<WebSocket, ExecutionMode>();
 
-  const realSeedClient = new BybitRealRestClient();
-  const demoSeedClient = new BybitDemoRestClient();
+  const realOrdersSeedClient = new BybitRealRestClient();
+  const demoOrdersSeedClient = new BybitDemoRestClient();
 
   const realStream = new BybitPrivateExecutionStream(
     "real",
     app.log,
     process.env.BYBIT_PRIVATE_WS_URL ?? "wss://stream.bybit.com/v5/private",
-    process.env.BYBIT_PUBLIC_WS_URL ?? PUBLIC_REAL_WS_URL,
     process.env.BYBIT_API_KEY ?? "",
     process.env.BYBIT_API_SECRET ?? "",
-    realSeedClient,
+    realOrdersSeedClient,
   );
 
   const demoStream = new BybitPrivateExecutionStream(
     "demo",
     app.log,
     process.env.BYBIT_DEMO_PRIVATE_WS_URL ?? "wss://stream-demo.bybit.com/v5/private",
-    process.env.BYBIT_DEMO_PUBLIC_WS_URL ?? PUBLIC_DEMO_WS_URL,
     process.env.BYBIT_DEMO_API_KEY ?? "",
     process.env.BYBIT_DEMO_API_SECRET ?? "",
-    demoSeedClient,
+    demoOrdersSeedClient,
   );
 
   const getStream = (mode: ExecutionMode) => (mode === "real" ? realStream : demoStream);

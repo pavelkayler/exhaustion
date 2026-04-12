@@ -15,7 +15,7 @@ import { ExecutionOrdersCard } from "./components/ExecutionOrdersCard";
 import { ExecutionSettingsCard } from "./components/ExecutionSettingsCard";
 
 export function ShortExecutionPage() {
-  const { conn, lastServerTime, wsUrl, streams } = useWsFeed();
+  const { conn, lastServerTime, wsUrl, streams, rows } = useWsFeed();
   const {
     status,
     busy,
@@ -88,6 +88,8 @@ export function ShortExecutionPage() {
               status={executionFeed.status}
               error={executionFeed.error}
               updatedAt={executionFeed.updatedAt}
+              marketRows={rows}
+              marketUpdatedAt={lastServerTime}
             />
           </Col>
 
