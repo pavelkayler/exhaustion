@@ -1,6 +1,7 @@
-
 import fs from "node:fs";
 import type { FastifyInstance } from "fastify";
+import { BybitDemoRestClient } from "../bybit/BybitDemoRestClient.js";
+import { BybitRealRestClient } from "../bybit/BybitRealRestClient.js";
 import { runtime } from "../runtime/runtime.js";
 import { configStore } from "../runtime/configStore.js";
 import {
@@ -18,6 +19,22 @@ import {
 
 let shutdownHandler: (() => Promise<void> | void) | null = null;
 
+type ExecutionMode = "demo" | "real";
+
+type ExecutionSnapshot = {
+  positions: Array<{
+    key: string;
+    symbol: string;
+    side: string | null;
+    size: number | null;
+    positionIdx?: number | null;
+  }>;
+  orders: Array<{
+    key: string;
+    symbol: string;
+  }>;
+};
+
 function isLocalRequestIp(ip: string | null | undefined): boolean {
   const normalized = String(ip ?? "").trim();
   return normalized === "127.0.0.1" || normalized === "::1" || normalized.endsWith("127.0.0.1");
@@ -26,6 +43,31 @@ function isLocalRequestIp(ip: string | null | undefined): boolean {
 function readNumber(value: unknown): number | null {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : null;
+}
+
+function normalizeMode(value: unknown): ExecutionMode {
+  return String(value ?? "").trim().toLowerCase() === "real" ? "real" : "demo";
+}
+
+function formatApiNumber(value: number): string {
+  if (!Number.isFinite(value)) return "0";
+  const text = value.toFixed(12);
+  return text.replace(/\.?0+$/, "") || "0";
+}
+
+function normalizePositionIdx(value: unknown): 0 | 1 | 2 {
+  const numeric = Math.floor(Number(value));
+  if (numeric === 1 || numeric === 2) return numeric;
+  return 0;
+}
+
+function extractOrderLinkId(symbol: string, key: string): string | null {
+  const normalizedSymbol = String(symbol ?? "").trim().toUpperCase();
+  if (!normalizedSymbol) return null;
+  const prefix = `${normalizedSymbol}:`;
+  if (!key.startsWith(prefix)) return null;
+  const suffix = key.slice(prefix.length).trim();
+  return suffix || null;
 }
 
 export function setShutdownHandler(handler: (() => Promise<void> | void) | null) {
@@ -37,6 +79,13 @@ export async function requestOptimizerGracefulPauseAndFlush(_args?: { timeoutMs?
 }
 
 export function registerHttpRoutes(app: FastifyInstance) {
+  const realExecutionRestClient = new BybitRealRestClient();
+  const demoExecutionRestClient = new BybitDemoRestClient();
+
+  const getExecutionRestClient = (mode: ExecutionMode) => (
+    mode === "real" ? realExecutionRestClient : demoExecutionRestClient
+  );
+
   app.get("/health", async () => ({ ok: true }));
 
   app.post("/api/admin/shutdown", async (req, reply) => {
@@ -98,11 +147,129 @@ export function registerHttpRoutes(app: FastifyInstance) {
   app.post("/api/execution/refresh", async (req, reply) => {
     try {
       const body = ((req.body ?? {}) as Record<string, unknown>) ?? {};
-      const mode = String(body.mode ?? "").trim().toLowerCase() === "real" ? "real" : "demo";
+      const mode = normalizeMode(body.mode);
       return await refreshPrivateExecutionSnapshot(mode);
     } catch (error) {
       reply.code(400);
       return { error: String((error as Error)?.message ?? error) };
+    }
+  });
+
+  app.post("/api/execution/positions/close-market", async (req, reply) => {
+    const body = ((req.body ?? {}) as Record<string, unknown>) ?? {};
+    const mode = normalizeMode(body.mode);
+    const key = String(body.key ?? "").trim();
+
+    if (!key) {
+      reply.code(400);
+      return { error: "position_key_required" };
+    }
+
+    try {
+      const client = getExecutionRestClient(mode);
+      if (!client.hasCredentials()) {
+        reply.code(400);
+        return { error: "missing_credentials" };
+      }
+
+      const snapshot = await refreshPrivateExecutionSnapshot(mode) as ExecutionSnapshot;
+      const position = snapshot.positions.find((row) => row.key === key);
+
+      if (!position) {
+        reply.code(404);
+        return { error: "position_not_found" };
+      }
+
+      const size = Number(position.size);
+      const side = String(position.side ?? "").trim().toUpperCase();
+      if (!(size > 0)) {
+        reply.code(400);
+        return { error: "position_size_invalid" };
+      }
+      if (side !== "BUY" && side !== "SELL") {
+        reply.code(400);
+        return { error: "position_side_invalid" };
+      }
+
+      const closeSide = side === "BUY" ? "Sell" : "Buy";
+      const positionIdx = normalizePositionIdx(position.positionIdx);
+
+      app.log.info(
+        { mode, key, symbol: position.symbol, side, size, positionIdx, closeSide },
+        "execution close market requested",
+      );
+
+      await client.placeOrderLinear({
+        symbol: position.symbol,
+        side: closeSide,
+        orderType: "Market",
+        qty: formatApiNumber(size),
+        reduceOnly: true,
+        positionIdx,
+      });
+
+      app.log.info(
+        { mode, key, symbol: position.symbol, side, size, positionIdx, closeSide },
+        "execution close market accepted",
+      );
+
+      return { ok: true };
+    } catch (error) {
+      const message = String((error as Error)?.message ?? error);
+      app.log.warn({ mode, key, error: message }, "execution close market failed");
+      reply.code(400);
+      return { error: message };
+    }
+  });
+
+  app.post("/api/execution/orders/cancel", async (req, reply) => {
+    const body = ((req.body ?? {}) as Record<string, unknown>) ?? {};
+    const mode = normalizeMode(body.mode);
+    const key = String(body.key ?? "").trim();
+
+    if (!key) {
+      reply.code(400);
+      return { error: "order_key_required" };
+    }
+
+    try {
+      const client = getExecutionRestClient(mode);
+      if (!client.hasCredentials()) {
+        reply.code(400);
+        return { error: "missing_credentials" };
+      }
+
+      const snapshot = await refreshPrivateExecutionSnapshot(mode) as ExecutionSnapshot;
+      const order = snapshot.orders.find((row) => row.key === key);
+
+      if (!order) {
+        reply.code(404);
+        return { error: "order_not_found" };
+      }
+
+      const orderLinkId = extractOrderLinkId(order.symbol, key);
+
+      app.log.info(
+        { mode, key, symbol: order.symbol, orderId: orderLinkId ? null : key, orderLinkId },
+        "execution cancel order requested",
+      );
+
+      await client.cancelOrderLinear({
+        symbol: order.symbol,
+        ...(orderLinkId ? { orderLinkId } : { orderId: key }),
+      });
+
+      app.log.info(
+        { mode, key, symbol: order.symbol, orderId: orderLinkId ? null : key, orderLinkId },
+        "execution cancel order accepted",
+      );
+
+      return { ok: true };
+    } catch (error) {
+      const message = String((error as Error)?.message ?? error);
+      app.log.warn({ mode, key, error: message }, "execution cancel order failed");
+      reply.code(400);
+      return { error: message };
     }
   });
 
@@ -179,7 +346,7 @@ export function registerHttpRoutes(app: FastifyInstance) {
     } = {
       symbol,
       side,
-      executionMode: String(body.executionMode ?? "").trim().toLowerCase() === "real" ? "real" : "demo",
+      executionMode: normalizeMode(body.executionMode),
     };
     const entryPrice = readNumber(body.entryPrice);
     const tpPrice = readNumber(body.tpPrice);

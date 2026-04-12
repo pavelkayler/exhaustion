@@ -1,4 +1,3 @@
-
 import { Col, Container, Row } from "react-bootstrap";
 import { HeaderBar } from "../dashboard/components/HeaderBar";
 import { useSessionRuntime } from "../../features/session/hooks/useSessionRuntime";
@@ -108,6 +107,10 @@ export function ShortExecutionPage() {
               updatedAt={executionFeed.updatedAt}
               marketRows={rows}
               marketUpdatedAt={lastServerTime}
+              positionPendingKeys={executionFeed.positionPendingKeys}
+              positionFailedKeys={executionFeed.positionFailedKeys}
+              positionActionError={executionFeed.positionActionError}
+              onCloseMarket={(key) => void executionFeed.closePositionMarket(key)}
             />
           </Col>
 
@@ -116,6 +119,10 @@ export function ShortExecutionPage() {
               orders={executionFeed.orders}
               status={executionFeed.status}
               error={executionFeed.error}
+              orderPendingKeys={executionFeed.orderPendingKeys}
+              orderFailedKeys={executionFeed.orderFailedKeys}
+              orderActionError={executionFeed.orderActionError}
+              onCancel={(key) => void executionFeed.cancelOrder(key)}
             />
           </Col>
 

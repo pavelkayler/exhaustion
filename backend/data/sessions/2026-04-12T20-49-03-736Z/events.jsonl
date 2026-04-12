@@ -1,0 +1,4 @@
+{"ts":1776026943737,"type":"SESSION_START","payload":{"sessionId":"2026-04-12T20-49-03-736Z"}}
+{"ts":1776026943739,"type":"SESSION_STATE","payload":{"state":"RESUMING","fromState":"STOPPED","runId":"2026-04-12T20-49-03-736Z","sessionId":"2026-04-12T20-49-03-736Z"}}
+{"ts":1776026943738,"type":"DEMO_RECONCILE_OK","payload":{"trackedOpenOrders":0,"trackedOpenPositions":0,"globalOpenOrders":7,"globalOpenPositions":3}}
+{"ts":1776026944620,"type":"SESSION_STATE","payload":{"state":"RUNNING","fromState":"RESUMING","runId":"2026-04-12T20-49-03-736Z","sessionId":"2026-04-12T20-49-03-736Z"}}

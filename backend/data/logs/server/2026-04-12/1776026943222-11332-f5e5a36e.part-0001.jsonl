@@ -1,0 +1,16 @@
+{"level":30,"time":1776026943700,"pid":11332,"bootSessionId":"1776026943222-11332-f5e5a36e","msg":"wsHub: /ws ready (dynamic universe via runtime config)"}
+{"level":30,"time":1776026943722,"pid":11332,"bootSessionId":"1776026943222-11332-f5e5a36e","host":"0.0.0.0","port":8081,"path":"/ws/private-positions","msg":"private execution ws ready"}
+{"level":30,"time":1776026943734,"pid":11332,"bootSessionId":"1776026943222-11332-f5e5a36e","msg":"Server listening at http://127.0.0.1:8080"}
+{"level":30,"time":1776026943735,"pid":11332,"bootSessionId":"1776026943222-11332-f5e5a36e","msg":"Server listening at http://10.35.7.240:8080"}
+{"level":30,"time":1776026943735,"pid":11332,"bootSessionId":"1776026943222-11332-f5e5a36e","msg":"Server listening at http://192.168.1.104:8080"}
+{"level":30,"time":1776026943735,"pid":11332,"bootSessionId":"1776026943222-11332-f5e5a36e","host":"0.0.0.0","port":8080,"bootSessionId":"1776026943222-11332-f5e5a36e","msg":"backend listening"}
+{"level":30,"time":1776026943740,"pid":11332,"bootSessionId":"1776026943222-11332-f5e5a36e","topics":500,"shards":4,"totalChars":9999,"maxCharsPerShard":3644,"msg":"bybit ws: starting sharded public streams"}
+{"level":30,"time":1776026944180,"pid":11332,"bootSessionId":"1776026943222-11332-f5e5a36e","reason":"startup","symbolsCount":100,"changed":true,"universeId":"bybit-linear-usdt-open-interest-top100","topSymbolsPreview":["BTCUSDT","ETHUSDT","SOLUSDT","HYPEUSDT","XRPUSDT","XAUTUSDT","DOGEUSDT","BNBUSDT","ZECUSDT","SUIUSDT"],"msg":"top open interest universe refreshed"}
+{"level":30,"time":1776026944360,"pid":11332,"bootSessionId":"1776026943222-11332-f5e5a36e","mode":"real","reason":"startup","positions":0,"orders":0,"msg":"private execution exchange refresh complete"}
+{"level":30,"time":1776026944559,"pid":11332,"bootSessionId":"1776026943222-11332-f5e5a36e","mode":"demo","kind":"open","msg":"private execution ws event"}
+{"level":30,"time":1776026944595,"pid":11332,"bootSessionId":"1776026943222-11332-f5e5a36e","mode":"real","kind":"open","msg":"private execution ws event"}
+{"level":30,"time":1776026944607,"pid":11332,"bootSessionId":"1776026943222-11332-f5e5a36e","shardKey":"linear-4","topics":20,"chars":442,"msg":"bybit ws shard: open"}
+{"level":30,"time":1776026944611,"pid":11332,"bootSessionId":"1776026943222-11332-f5e5a36e","shardKey":"linear-1","topics":160,"chars":2679,"msg":"bybit ws shard: open"}
+{"level":30,"time":1776026944614,"pid":11332,"bootSessionId":"1776026943222-11332-f5e5a36e","shardKey":"linear-3","topics":160,"chars":3644,"msg":"bybit ws shard: open"}
+{"level":30,"time":1776026944620,"pid":11332,"bootSessionId":"1776026943222-11332-f5e5a36e","shardKey":"linear-2","topics":160,"chars":3231,"msg":"bybit ws shard: open"}
+{"level":30,"time":1776026944635,"pid":11332,"bootSessionId":"1776026943222-11332-f5e5a36e","mode":"demo","reason":"startup","positions":3,"orders":1,"msg":"private execution exchange refresh complete"}

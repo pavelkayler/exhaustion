@@ -11,3 +11,5 @@ npm-debug.log*
 yarn-error.log*
 *.log
 backend-dev.log
+
+backend/data/short_research/

@@ -1,4 +1,3 @@
-
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { getApiBase, getPrivatePositionsWsUrl } from "../../../shared/config/env";
 
@@ -65,6 +64,8 @@ type FeedState = {
   error: string | null;
 };
 
+type ActionKeyMap = Record<string, true>;
+
 const EMPTY_STATE: FeedState = {
   conn: "CONNECTING",
   status: "connecting",
@@ -76,14 +77,31 @@ const EMPTY_STATE: FeedState = {
 
 const apiBase = getApiBase();
 
-async function requestRefresh(mode: "demo" | "real"): Promise<PositionsSnapshot> {
-  const response = await fetch(`${apiBase}/api/execution/refresh`, {
+function toErrorMessage(error: unknown): string {
+  return String((error as Error)?.message ?? error ?? "unknown_error");
+}
+
+function pruneKeyMap(map: ActionKeyMap, activeKeys: Set<string>): ActionKeyMap {
+  let changed = false;
+  const next: ActionKeyMap = {};
+  for (const key of Object.keys(map)) {
+    if (activeKeys.has(key)) {
+      next[key] = true;
+      continue;
+    }
+    changed = true;
+  }
+  return changed ? next : map;
+}
+
+async function postJson<T>(path: string, body: Record<string, unknown>): Promise<T> {
+  const response = await fetch(`${apiBase}${path}`, {
     method: "POST",
     credentials: "same-origin",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ mode }),
+    body: JSON.stringify(body ?? {}),
   });
   const text = await response.text();
   const data = text.length > 0 ? JSON.parse(text) : null;
@@ -96,12 +114,38 @@ async function requestRefresh(mode: "demo" | "real"): Promise<PositionsSnapshot>
       ),
     );
   }
-  return data as PositionsSnapshot;
+  return data as T;
+}
+
+async function requestRefresh(mode: "demo" | "real"): Promise<PositionsSnapshot> {
+  return postJson<PositionsSnapshot>("/api/execution/refresh", { mode });
+}
+
+async function requestClosePositionMarket(
+  mode: "demo" | "real",
+  key: string,
+): Promise<{ ok: true }> {
+  return postJson<{ ok: true }>("/api/execution/positions/close-market", { mode, key });
+}
+
+async function requestCancelOrder(
+  mode: "demo" | "real",
+  key: string,
+): Promise<{ ok: true }> {
+  return postJson<{ ok: true }>("/api/execution/orders/cancel", { mode, key });
 }
 
 export function usePrivatePositionsFeed(mode: "demo" | "real") {
   const [state, setState] = useState<FeedState>(EMPTY_STATE);
   const [refreshing, setRefreshing] = useState(false);
+
+  const [positionPendingKeys, setPositionPendingKeys] = useState<ActionKeyMap>({});
+  const [positionFailedKeys, setPositionFailedKeys] = useState<ActionKeyMap>({});
+  const [positionActionError, setPositionActionError] = useState<string | null>(null);
+
+  const [orderPendingKeys, setOrderPendingKeys] = useState<ActionKeyMap>({});
+  const [orderFailedKeys, setOrderFailedKeys] = useState<ActionKeyMap>({});
+  const [orderActionError, setOrderActionError] = useState<string | null>(null);
 
   const wsUrl = useMemo(() => getPrivatePositionsWsUrl(mode), [mode]);
 
@@ -125,6 +169,99 @@ export function usePrivatePositionsFeed(mode: "demo" | "real") {
       setRefreshing(false);
     }
   }, [applySnapshot, mode]);
+
+  const closePositionMarket = useCallback(async (key: string) => {
+    if (!key) return;
+
+    setPositionActionError(null);
+    setPositionPendingKeys((prev) => ({ ...prev, [key]: true }));
+    setPositionFailedKeys((prev) => {
+      if (!prev[key]) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+
+    try {
+      await requestClosePositionMarket(mode, key);
+    } catch (error) {
+      const message = toErrorMessage(error);
+      setPositionPendingKeys((prev) => {
+        if (!prev[key]) return prev;
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+      setPositionFailedKeys((prev) => ({ ...prev, [key]: true }));
+      setPositionActionError(message);
+    }
+  }, [mode]);
+
+  const cancelOrder = useCallback(async (key: string) => {
+    if (!key) return;
+
+    setOrderActionError(null);
+    setOrderPendingKeys((prev) => ({ ...prev, [key]: true }));
+    setOrderFailedKeys((prev) => {
+      if (!prev[key]) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+
+    try {
+      await requestCancelOrder(mode, key);
+    } catch (error) {
+      const message = toErrorMessage(error);
+      setOrderPendingKeys((prev) => {
+        if (!prev[key]) return prev;
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+      setOrderFailedKeys((prev) => ({ ...prev, [key]: true }));
+      setOrderActionError(message);
+    }
+  }, [mode]);
+
+  useEffect(() => {
+    setPositionPendingKeys({});
+    setPositionFailedKeys({});
+    setPositionActionError(null);
+    setOrderPendingKeys({});
+    setOrderFailedKeys({});
+    setOrderActionError(null);
+  }, [mode]);
+
+  useEffect(() => {
+    const activeKeys = new Set<string>(state.positions.map((row) => row.key));
+    setPositionPendingKeys((prev) => pruneKeyMap(prev, activeKeys));
+    setPositionFailedKeys((prev) => pruneKeyMap(prev, activeKeys));
+  }, [state.positions]);
+
+  useEffect(() => {
+    const activeKeys = new Set<string>(state.orders.map((row) => row.key));
+    setOrderPendingKeys((prev) => pruneKeyMap(prev, activeKeys));
+    setOrderFailedKeys((prev) => pruneKeyMap(prev, activeKeys));
+  }, [state.orders]);
+
+  useEffect(() => {
+    if (
+      Object.keys(positionPendingKeys).length === 0
+      && Object.keys(positionFailedKeys).length === 0
+    ) {
+      setPositionActionError(null);
+    }
+  }, [positionPendingKeys, positionFailedKeys]);
+
+  useEffect(() => {
+    if (
+      Object.keys(orderPendingKeys).length === 0
+      && Object.keys(orderFailedKeys).length === 0
+    ) {
+      setOrderActionError(null);
+    }
+  }, [orderPendingKeys, orderFailedKeys]);
 
   useEffect(() => {
     let active = true;
@@ -192,5 +329,18 @@ export function usePrivatePositionsFeed(mode: "demo" | "real") {
     };
   }, [applySnapshot, wsUrl]);
 
-  return { ...state, wsUrl, refreshing, refresh };
+  return {
+    ...state,
+    wsUrl,
+    refreshing,
+    refresh,
+    closePositionMarket,
+    cancelOrder,
+    positionPendingKeys,
+    positionFailedKeys,
+    positionActionError,
+    orderPendingKeys,
+    orderFailedKeys,
+    orderActionError,
+  };
 }
