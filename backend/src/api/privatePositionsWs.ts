@@ -108,6 +108,25 @@ type StoredOrderRow = ExecutionOrderRow & {
   updatedAt: number;
 };
 
+type StoredRawOrder = {
+  key: string;
+  symbol: string;
+  side: string | null;
+  orderType: string | null;
+  stopOrderType: string | null;
+  orderFilter: string | null;
+  triggerPrice: number | null;
+  price: number | null;
+  qty: number | null;
+  leavesQty: number | null;
+  reduceOnly: boolean;
+  closeOnTrigger: boolean;
+  positionIdx: number | null;
+  orderLinkId: string | null;
+  orderId: string | null;
+  updatedAt: number;
+};
+
 type InstrumentSpec = {
   tickSize: number;
   qtyStep: number;
@@ -136,6 +155,12 @@ function readNumber(value: unknown): number | null {
 function readPositiveNumber(value: unknown): number | null {
   const numeric = readNumber(value);
   return numeric != null && numeric > 0 ? numeric : null;
+}
+
+function readBooleanFlag(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return normalized === "true" || normalized === "1" || normalized === "yes" || normalized === "on";
 }
 
 function inferReason(row: Record<string, unknown>): ExecutionReason {
@@ -238,6 +263,38 @@ function isActiveOrderStatus(value: unknown): boolean {
 
 function isLimitOrderType(value: unknown): boolean {
   return String(value ?? "").trim().toUpperCase() === "LIMIT";
+}
+
+function normalizeRawOrderRow(
+  row: Record<string, unknown>,
+  receivedAt: number,
+): StoredRawOrder | null {
+  if (!isActiveOrderStatus(row.orderStatus)) return null;
+
+  const symbol = String(row.symbol ?? "").trim().toUpperCase();
+  if (!symbol) return null;
+
+  return {
+    key: toOrderKey(row),
+    symbol,
+    side: String(row.side ?? "").trim().toUpperCase() || null,
+    orderType: String(row.orderType ?? "").trim().toUpperCase() || null,
+    stopOrderType: String(row.stopOrderType ?? row.triggerBy ?? "").trim().toUpperCase() || null,
+    orderFilter: String(row.orderFilter ?? row.triggerDirection ?? "").trim().toUpperCase() || null,
+    triggerPrice: readPositiveNumber(row.triggerPrice ?? row.triggerPx ?? row.stopPx),
+    price: readPositiveNumber(row.price ?? row.orderPrice),
+    qty:
+      readPositiveNumber(row.qty) ??
+      readPositiveNumber(row.orderQty) ??
+      readPositiveNumber(row.size),
+    leavesQty: readPositiveNumber(row.leavesQty),
+    reduceOnly: readBooleanFlag(row.reduceOnly),
+    closeOnTrigger: readBooleanFlag(row.closeOnTrigger),
+    positionIdx: readNumber(row.positionIdx),
+    orderLinkId: String(row.orderLinkId ?? "").trim() || null,
+    orderId: String(row.orderId ?? "").trim() || null,
+    updatedAt: readRowUpdatedAt(row, receivedAt),
+  };
 }
 
 function normalizeOrderRow(
@@ -393,12 +450,17 @@ function computeTrailingDistance(anchorPrice: number, pct: number, tickSize: num
 }
 
 function isRelevantExitOrder(order: Record<string, unknown>): boolean {
+  const stopOrderType = String(order.stopOrderType ?? "").trim().toUpperCase();
+  const orderFilter = String(order.orderFilter ?? "").trim().toUpperCase();
   return (
     isActiveOrderStatus(order.orderStatus) &&
     (
-      order.reduceOnly === true ||
-      order.closeOnTrigger === true ||
-      isExecutorOrderLinkId(order.orderLinkId)
+      readBooleanFlag(order.reduceOnly) ||
+      readBooleanFlag(order.closeOnTrigger) ||
+      isExecutorOrderLinkId(order.orderLinkId) ||
+      stopOrderType.includes("TAKEPROFIT") ||
+      stopOrderType.includes("STOPLOSS") ||
+      orderFilter === "TPSLORDER"
     )
   );
 }
@@ -420,6 +482,76 @@ function parseInstrumentSpec(raw: Record<string, unknown>): InstrumentSpec {
   };
 }
 
+
+type DerivedProtectionSnapshot = {
+  tp: number | null;
+  tpUpdatedAt: number | null;
+  sl: number | null;
+  slUpdatedAt: number | null;
+};
+
+function pickNewestNumber(candidates: Array<{ value: number | null | undefined; updatedAt: number | null | undefined }>): number | null {
+  let selected: number | null = null;
+  let selectedAt = Number.NEGATIVE_INFINITY;
+  for (const candidate of candidates) {
+    if (!Number.isFinite(candidate.value as number) || Number(candidate.value) <= 0) continue;
+    const updatedAt = Number.isFinite(candidate.updatedAt as number) ? Number(candidate.updatedAt) : 0;
+    if (selected == null || updatedAt >= selectedAt) {
+      selected = Number(candidate.value);
+      selectedAt = updatedAt;
+    }
+  }
+  return selected;
+}
+
+function matchesPositionRawOrder(position: StoredPositionRow, order: StoredRawOrder): boolean {
+  if (order.symbol !== position.symbol) return false;
+  const exitSide = getExitOrderSide(position.side).toUpperCase();
+  if (String(order.side ?? "").trim().toUpperCase() !== exitSide) return false;
+  const positionIdx = position.positionIdx != null ? Math.floor(position.positionIdx) : parsePositionIdxFromKey(position.key);
+  if (order.positionIdx != null && positionIdx !== order.positionIdx) return false;
+  return true;
+}
+
+function deriveProtectionFromRawOrders(
+  position: StoredPositionRow,
+  rawOrders: StoredRawOrder[],
+): DerivedProtectionSnapshot {
+  let tp: number | null = null;
+  let tpUpdatedAt: number | null = null;
+  let sl: number | null = null;
+  let slUpdatedAt: number | null = null;
+
+  for (const order of rawOrders) {
+    if (!matchesPositionRawOrder(position, order)) continue;
+    if (!(order.reduceOnly || order.closeOnTrigger || isExecutorOrderLinkId(order.orderLinkId) || String(order.stopOrderType ?? "").includes("TAKEPROFIT") || String(order.stopOrderType ?? "").includes("STOPLOSS") || String(order.orderFilter ?? "") === "TPSLORDER")) {
+      continue;
+    }
+
+    const stopOrderType = String(order.stopOrderType ?? "").trim().toUpperCase();
+    const candidatePrice = order.triggerPrice ?? order.price ?? null;
+    if (!(Number.isFinite(candidatePrice as number) && Number(candidatePrice) > 0)) continue;
+
+    const isPartialExecutorTp = isExecutorOrderLinkId(order.orderLinkId) && String(order.orderType ?? "") === "LIMIT";
+    if (stopOrderType.includes("TAKEPROFIT") || isPartialExecutorTp) {
+      if (tp == null || Number(order.updatedAt) >= Number(tpUpdatedAt ?? 0)) {
+        tp = Number(candidatePrice);
+        tpUpdatedAt = order.updatedAt;
+      }
+      continue;
+    }
+
+    if (stopOrderType.includes("STOPLOSS")) {
+      if (sl == null || Number(order.updatedAt) >= Number(slUpdatedAt ?? 0)) {
+        sl = Number(candidatePrice);
+        slUpdatedAt = order.updatedAt;
+      }
+    }
+  }
+
+  return { tp, tpUpdatedAt, sl, slUpdatedAt };
+}
+
 class BybitPrivateExecutionStream {
   private privateWs: WebSocket | null = null;
   private privateReconnectTimer: NodeJS.Timeout | null = null;
@@ -438,6 +570,9 @@ class BybitPrivateExecutionStream {
   private readonly restOrders = new Map<string, StoredOrderRow>();
   private readonly wsOrders = new Map<string, StoredOrderRow>();
   private readonly orderDeletes = new Map<string, number>();
+  private readonly restRawOrders = new Map<string, StoredRawOrder>();
+  private readonly wsRawOrders = new Map<string, StoredRawOrder>();
+  private readonly rawOrderDeletes = new Map<string, number>();
 
   private readonly listeners = new Set<(snapshot: PositionsSnapshot) => void>();
 
@@ -568,6 +703,7 @@ class BybitPrivateExecutionStream {
 
   private buildVisiblePositionMap(): Map<string, StoredPositionRow> {
     const visible = new Map<string, StoredPositionRow>();
+    const rawOrders = this.getMergedRawOrders();
     const keys = new Set<string>([
       ...this.restPositions.keys(),
       ...this.wsPositions.keys(),
@@ -582,14 +718,31 @@ class BybitPrivateExecutionStream {
       const restAllowed = restRow != null && (deleteTs == null || restRow.updatedAt > deleteTs);
       const wsAllowed = wsRow != null && (deleteTs == null || wsRow.updatedAt > deleteTs);
 
-      if (wsAllowed && (!restAllowed || wsRow!.updatedAt >= restRow!.updatedAt)) {
-        visible.set(key, wsRow!);
-        continue;
-      }
+      const selected = wsAllowed && (!restAllowed || wsRow!.updatedAt >= restRow!.updatedAt)
+        ? wsRow
+        : restAllowed
+          ? restRow
+          : null;
+      if (!selected) continue;
 
-      if (restAllowed) {
-        visible.set(key, restRow!);
-      }
+      const protection = deriveProtectionFromRawOrders(selected, rawOrders);
+      visible.set(key, {
+        ...selected,
+        tp: pickNewestNumber([
+          { value: protection.tp, updatedAt: protection.tpUpdatedAt },
+          { value: wsAllowed ? wsRow?.tp : null, updatedAt: wsAllowed ? wsRow?.updatedAt : null },
+          { value: restAllowed ? restRow?.tp : null, updatedAt: restAllowed ? restRow?.updatedAt : null },
+        ]),
+        sl: pickNewestNumber([
+          { value: protection.sl, updatedAt: protection.slUpdatedAt },
+          { value: wsAllowed ? wsRow?.sl : null, updatedAt: wsAllowed ? wsRow?.updatedAt : null },
+          { value: restAllowed ? restRow?.sl : null, updatedAt: restAllowed ? restRow?.updatedAt : null },
+        ]),
+        trailingStop: pickNewestNumber([
+          { value: wsAllowed ? wsRow?.trailingStop : null, updatedAt: wsAllowed ? wsRow?.updatedAt : null },
+          { value: restAllowed ? restRow?.trailingStop : null, updatedAt: restAllowed ? restRow?.updatedAt : null },
+        ]),
+      });
     }
 
     return visible;
@@ -601,6 +754,35 @@ class BybitPrivateExecutionStream {
       if (symbolCmp !== 0) return symbolCmp;
       return left.key.localeCompare(right.key);
     });
+  }
+
+  private getMergedRawOrders(): StoredRawOrder[] {
+    const visible = new Map<string, StoredRawOrder>();
+    const keys = new Set<string>([
+      ...this.restRawOrders.keys(),
+      ...this.wsRawOrders.keys(),
+      ...this.rawOrderDeletes.keys(),
+    ]);
+
+    for (const key of keys) {
+      const restRow = this.restRawOrders.get(key) ?? null;
+      const wsRow = this.wsRawOrders.get(key) ?? null;
+      const deleteTs = this.rawOrderDeletes.get(key) ?? null;
+
+      const restAllowed = restRow != null && (deleteTs == null || restRow.updatedAt > deleteTs);
+      const wsAllowed = wsRow != null && (deleteTs == null || wsRow.updatedAt > deleteTs);
+
+      if (wsAllowed && (!restAllowed || wsRow!.updatedAt >= restRow!.updatedAt)) {
+        visible.set(key, wsRow!);
+        continue;
+      }
+
+      if (restAllowed) {
+        visible.set(key, restRow!);
+      }
+    }
+
+    return Array.from(visible.values());
   }
 
   private getMergedOrders(): StoredOrderRow[] {
@@ -674,12 +856,21 @@ class BybitPrivateExecutionStream {
         limit: 50,
       });
 
+      const nextRestRawOrders = new Map<string, StoredRawOrder>();
       const nextRestOrders = new Map<string, StoredOrderRow>();
       for (const item of Array.isArray(ordersResponse?.list) ? ordersResponse.list : []) {
         if (!item || typeof item !== "object") continue;
+        const rawNormalized = normalizeRawOrderRow(item, refreshedAt);
+        if (rawNormalized) {
+          nextRestRawOrders.set(rawNormalized.key, rawNormalized);
+        }
         const normalized = normalizeOrderRow(item, leverageFallbackBySymbol, refreshedAt);
         if (!normalized) continue;
         nextRestOrders.set(normalized.key, normalized);
+      }
+      this.restRawOrders.clear();
+      for (const [key, value] of nextRestRawOrders.entries()) {
+        this.restRawOrders.set(key, value);
       }
       this.restOrders.clear();
       for (const [key, value] of nextRestOrders.entries()) {
@@ -697,6 +888,7 @@ class BybitPrivateExecutionStream {
           reason,
           positions: nextRestPositions.size,
           orders: nextRestOrders.size,
+          rawOrders: nextRestRawOrders.size,
         },
         "private execution state refreshed from rest",
       );
@@ -721,6 +913,11 @@ class BybitPrivateExecutionStream {
   private markOrderDeleted(key: string, deletedAt: number): void {
     this.wsOrders.delete(key);
     this.orderDeletes.set(key, deletedAt);
+  }
+
+  private markRawOrderDeleted(key: string, deletedAt: number): void {
+    this.wsRawOrders.delete(key);
+    this.rawOrderDeletes.set(key, deletedAt);
   }
 
   private handlePositionFrame(data: unknown): void {
@@ -765,9 +962,18 @@ class BybitPrivateExecutionStream {
     const leverageFallbackBySymbol = this.buildLeverageFallbackBySymbol();
 
     for (const item of parseMessageItems(data)) {
-      const normalized = normalizeOrderRow(item, leverageFallbackBySymbol, receivedAt);
       const key = toOrderKey(item);
+      const rawNormalized = normalizeRawOrderRow(item, receivedAt);
+      if (!rawNormalized) {
+        this.markRawOrderDeleted(key, receivedAt);
+        this.markOrderDeleted(key, receivedAt);
+        continue;
+      }
 
+      this.rawOrderDeletes.delete(key);
+      this.wsRawOrders.set(key, rawNormalized);
+
+      const normalized = normalizeOrderRow(item, leverageFallbackBySymbol, receivedAt);
       if (!normalized) {
         this.markOrderDeleted(key, receivedAt);
         continue;
