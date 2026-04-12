@@ -113,10 +113,19 @@ type InstrumentSpec = {
   qtyStep: number;
 };
 
+type TrailingReconcileSummary = {
+  total: number;
+  attempted: number;
+  failed: number;
+  pending: number;
+};
+
 const POSITIONS_WS_PATH = "/ws/private-positions";
 const PRIVATE_WS_PING_INTERVAL_MS = 20_000;
 const CLIENT_BROADCAST_INTERVAL_MS = 1_000;
 const REST_REFRESH_INTERVAL_MS = 60_000;
+const TRAILING_RECONCILE_RETRY_MS = 5_000;
+const TRAILING_RECONCILE_DEBOUNCE_MS = 250;
 
 function deepClone<T>(value: T): T {
   return structuredClone(value);
@@ -421,6 +430,10 @@ function computeSlPrice(entryPrice: number, side: string | null, slPct: number):
   return String(side ?? "").trim().toUpperCase() === "SELL"
     ? entryPrice * (1 + ratio)
     : entryPrice * (1 - ratio);
+}
+
+function computeTrailingDistance(entryPrice: number, slPct: number): number {
+  return entryPrice * (Math.max(0, slPct) / 100);
 }
 
 function mergeStoredPositionRows(
@@ -1047,6 +1060,9 @@ class PrivateExecutionExecutorManager {
   private error: string | null = null;
   private activeSettings: ExecutorSettings | null = null;
   private readonly instrumentCache = new Map<string, InstrumentSpec>();
+  private readonly streamUnsubscribes: Array<() => void> = [];
+  private trailingReconcileTimer: NodeJS.Timeout | null = null;
+  private trailingReconcileInFlight = false;
 
   constructor(
     private readonly logger: FastifyBaseLogger,
@@ -1054,10 +1070,26 @@ class PrivateExecutionExecutorManager {
     private readonly realStream: BybitPrivateExecutionStream,
   ) {
     runtime.on("state", this.handleRuntimeState);
+    this.streamUnsubscribes.push(
+      this.demoStream.addListener(() => {
+        this.handleStreamSnapshot("demo");
+      }),
+      this.realStream.addListener(() => {
+        this.handleStreamSnapshot("real");
+      }),
+    );
   }
 
   dispose(): void {
     runtime.off("state", this.handleRuntimeState);
+    for (const unsubscribe of this.streamUnsubscribes) {
+      try {
+        unsubscribe();
+      } catch {
+        continue;
+      }
+    }
+    this.clearTrailingReconcileTimer();
   }
 
   resetOnBoot(): void {
@@ -1067,6 +1099,7 @@ class PrivateExecutionExecutorManager {
     this.status = "stopped";
     this.error = null;
     this.activeSettings = null;
+    this.clearTrailingReconcileTimer();
   }
 
   getPublicState(): ExecutorPublicState {
@@ -1113,6 +1146,7 @@ class PrivateExecutionExecutorManager {
     this.error = null;
     this.status = "stopped";
     this.activeSettings = null;
+    this.clearTrailingReconcileTimer();
     return this.getPublicState();
   }
 
@@ -1120,16 +1154,75 @@ class PrivateExecutionExecutorManager {
     if (!executorStore.getState().running) {
       this.status = "stopped";
       this.activeSettings = null;
+      this.clearTrailingReconcileTimer();
       return;
     }
     if (!isRuntimeSessionActive()) {
       this.status = "waiting_session";
+      this.clearTrailingReconcileTimer();
       return;
     }
     if (this.status === "waiting_session") {
       void this.activate("runtime_ready");
+      return;
     }
+    this.scheduleTrailingReconcile("runtime_state", TRAILING_RECONCILE_DEBOUNCE_MS);
   };
+
+  private handleStreamSnapshot(mode: ExecutionMode): void {
+    const settings = this.activeSettings;
+    if (!executorStore.getState().running) return;
+    if (!isRuntimeSessionActive()) return;
+    if (!settings || settings.exit !== "trailing" || settings.mode !== mode) return;
+    this.scheduleTrailingReconcile("stream_update", TRAILING_RECONCILE_DEBOUNCE_MS);
+  }
+
+  private clearTrailingReconcileTimer(): void {
+    if (this.trailingReconcileTimer) {
+      clearTimeout(this.trailingReconcileTimer);
+      this.trailingReconcileTimer = null;
+    }
+  }
+
+  private scheduleTrailingReconcile(reason: string, delayMs: number): void {
+    const settings = this.activeSettings;
+    if (!executorStore.getState().running) return;
+    if (!settings || settings.exit !== "trailing") return;
+    this.clearTrailingReconcileTimer();
+    this.trailingReconcileTimer = setTimeout(() => {
+      this.trailingReconcileTimer = null;
+      void this.runTrailingReconcileLoop(reason);
+    }, Math.max(0, delayMs));
+  }
+
+  private async runTrailingReconcileLoop(reason: string): Promise<void> {
+    const settings = this.activeSettings;
+    if (!executorStore.getState().running) return;
+    if (!settings || settings.exit !== "trailing") return;
+    if (!isRuntimeSessionActive()) return;
+
+    if (this.trailingReconcileInFlight) {
+      this.scheduleTrailingReconcile(`${reason}_queued`, TRAILING_RECONCILE_RETRY_MS);
+      return;
+    }
+
+    this.trailingReconcileInFlight = true;
+    try {
+      const stream = this.getActiveStream(settings.mode);
+      const summary = await this.reconcileTrailingPositions(stream, settings, reason);
+      if (summary.pending > 0) {
+        this.scheduleTrailingReconcile(`${reason}_retry`, TRAILING_RECONCILE_RETRY_MS);
+      }
+    } catch (error) {
+      this.logger.error(
+        { mode: settings.mode, reason, error: String((error as Error)?.message ?? error) },
+        "private execution executor trailing reconcile loop failed",
+      );
+      this.scheduleTrailingReconcile(`${reason}_retry_error`, TRAILING_RECONCILE_RETRY_MS);
+    } finally {
+      this.trailingReconcileInFlight = false;
+    }
+  }
 
   private getActiveStream(mode: ExecutionMode): BybitPrivateExecutionStream {
     return mode === "real" ? this.realStream : this.demoStream;
@@ -1151,6 +1244,13 @@ class PrivateExecutionExecutorManager {
 
     if (settings.exit === "full") {
       await this.reconcileFullAtStart(stream, settings);
+    }
+
+    if (settings.exit === "trailing") {
+      const summary = await this.reconcileTrailingPositions(stream, settings, `executor_${reason}_trailing_startup`);
+      if (summary.pending > 0) {
+        this.scheduleTrailingReconcile(`${reason}_startup_retry`, TRAILING_RECONCILE_RETRY_MS);
+      }
     }
 
     this.status = "running";
@@ -1279,6 +1379,172 @@ class PrivateExecutionExecutorManager {
     if (errors.length > 0 && errors.length === positions.length) {
       throw new Error(errors.join(" | "));
     }
+  }
+
+  private async reconcileTrailingPositions(
+    stream: BybitPrivateExecutionStream,
+    settings: ExecutorSettings,
+    reason: string,
+  ): Promise<TrailingReconcileSummary> {
+    const restClient = stream.getRestClient();
+    if (!restClient || !restClient.hasCredentials()) {
+      throw new Error("missing_credentials");
+    }
+
+    const positions = stream.getPositionsDetailed().filter((row) => Number(row.size ?? 0) > 0);
+    let attempted = 0;
+    let failed = 0;
+    let pending = 0;
+
+    for (const position of positions) {
+      if (!Number.isFinite(position.entryPrice as number) || Number(position.entryPrice) <= 0) {
+        pending += 1;
+        this.logger.warn(
+          { mode: settings.mode, reason, symbol: position.symbol, key: position.key, entryPrice: position.entryPrice },
+          "private execution executor trailing reconcile postponed: invalid entry price",
+        );
+        continue;
+      }
+
+      const positionIdx = resolvePositionIdx(position);
+
+      try {
+        const instrument = await this.getInstrumentSpec(settings.mode, restClient, position.symbol);
+        const targetTrailingStop = roundNearestToStep(
+          computeTrailingDistance(Number(position.entryPrice), settings.slPct),
+          instrument.tickSize,
+        );
+        const hasTp = (position.tp ?? null) != null;
+        const hasSl = (position.sl ?? null) != null;
+        const hasTrailing = (position.trailingStop ?? null) != null;
+        const trailingMatches = sameWithinStep(position.trailingStop ?? null, targetTrailingStop, instrument.tickSize);
+        const needsTrailingClear = hasTrailing && !trailingMatches;
+        const needsTpReset = hasTp;
+        const needsSlReset = hasSl;
+        const needsTrailingSet = !hasTrailing || !trailingMatches;
+
+        if (!needsTpReset && !needsSlReset && !needsTrailingSet) {
+          continue;
+        }
+
+        attempted += 1;
+
+        if (needsTrailingClear) {
+          this.logger.info(
+            {
+              mode: settings.mode,
+              reason,
+              symbol: position.symbol,
+              positionIdx,
+              patch: { trailingStop: "0" },
+            },
+            "private execution executor apply trailing clear patch",
+          );
+          await restClient.setTradingStopLinear({
+            symbol: position.symbol,
+            positionIdx,
+            trailingStop: "0",
+          });
+        }
+
+        if (needsTpReset) {
+          this.logger.info(
+            {
+              mode: settings.mode,
+              reason,
+              symbol: position.symbol,
+              positionIdx,
+              patch: { tpslMode: "Full", takeProfit: "0" },
+            },
+            "private execution executor apply tp clear patch",
+          );
+          await restClient.setTradingStopLinear({
+            symbol: position.symbol,
+            positionIdx,
+            tpslMode: "Full",
+            takeProfit: "0",
+          });
+        }
+
+        if (needsSlReset) {
+          this.logger.info(
+            {
+              mode: settings.mode,
+              reason,
+              symbol: position.symbol,
+              positionIdx,
+              patch: { tpslMode: "Full", stopLoss: "0" },
+            },
+            "private execution executor apply sl clear patch",
+          );
+          await restClient.setTradingStopLinear({
+            symbol: position.symbol,
+            positionIdx,
+            tpslMode: "Full",
+            stopLoss: "0",
+          });
+        }
+
+        if (needsTrailingSet) {
+          this.logger.info(
+            {
+              mode: settings.mode,
+              reason,
+              symbol: position.symbol,
+              positionIdx,
+              patch: { trailingStop: formatForApi(targetTrailingStop) },
+            },
+            "private execution executor apply trailing patch",
+          );
+          await restClient.setTradingStopLinear({
+            symbol: position.symbol,
+            positionIdx,
+            trailingStop: formatForApi(targetTrailingStop),
+          });
+        }
+      } catch (error) {
+        failed += 1;
+        const message = String((error as Error)?.message ?? error);
+        this.logger.error(
+          {
+            mode: settings.mode,
+            reason,
+            symbol: position.symbol,
+            side: position.side,
+            positionIdx,
+            entryPrice: position.entryPrice,
+            tp: position.tp,
+            sl: position.sl,
+            trailingStop: position.trailingStop,
+            error: message,
+          },
+          "private execution executor trailing reconcile failed",
+        );
+      }
+    }
+
+    pending += failed;
+
+    if (attempted > 0 || pending > 0) {
+      this.logger.info(
+        {
+          mode: settings.mode,
+          reason,
+          total: positions.length,
+          attempted,
+          failed,
+          pending,
+        },
+        "private execution executor trailing reconcile summary",
+      );
+    }
+
+    return {
+      total: positions.length,
+      attempted,
+      failed,
+      pending,
+    };
   }
 
   private async getInstrumentSpec(

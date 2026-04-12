@@ -12,4 +12,4 @@ yarn-error.log*
 *.log
 backend-dev.log
 
-backend/data/short_research/
+backend\data\short_research\

@@ -14,10 +14,10 @@
     "takeCandidateSignalsInLiveExecution": true,
     "takeFinalSignals": true,
     "cancelActivePositionOrders": true,
-    "exit": "full"
+    "exit": "trailing"
   },
-  "running": false,
+  "running": true,
   "error": null,
-  "updatedAt": 1776026952324,
+  "updatedAt": 1776029370010,
   "positionStates": {}
 }
