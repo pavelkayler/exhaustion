@@ -94,7 +94,7 @@ export function ExecutionPositionsCard({
                     {formatCurrencyRight(row.displayPnl, 2)}
                   </td>
                   <td>{formatPercent(computeTargetPct(row.tp, row.entryPrice), 2)}</td>
-                  <td>{formatPercent(computeTargetPct(row.sl, row.entryPrice), 2)}</td>
+                  <td>{formatPercent(computeTargetPct(row.displaySl, row.entryPrice), 2)}</td>
                   <td>
                     <button
                       type="button"

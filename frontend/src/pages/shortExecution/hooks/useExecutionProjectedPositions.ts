@@ -8,6 +8,7 @@ const MARK_PRICE_PROJECT_MAX_AGE_MS = 60_000;
 export type DisplayExecutionPositionRow = ExecutionPositionRow & {
   displayValue: number | null;
   displayPnl: number | null;
+  displaySl: number | null;
   displayUpdatedAt: number | null;
 };
 
@@ -50,6 +51,33 @@ function computeProjectedPnl(args: {
   return args.basePnl;
 }
 
+function computeDisplaySl(args: {
+  sl: number | null;
+  trailingStop: number | null;
+  side: string | null;
+  currentMarkPrice: number | null;
+}): number | null {
+  const explicitSl = Number(args.sl);
+  if (explicitSl > 0) return explicitSl;
+
+  const trailingStop = Number(args.trailingStop);
+  const currentMarkPrice = Number(args.currentMarkPrice);
+  if (!(trailingStop > 0) || !(currentMarkPrice > 0)) {
+    return null;
+  }
+
+  const side = String(args.side ?? "").trim().toUpperCase();
+  if (side === "SELL") {
+    return currentMarkPrice + trailingStop;
+  }
+
+  if (side === "BUY") {
+    return Math.max(0, currentMarkPrice - trailingStop);
+  }
+
+  return null;
+}
+
 export function useExecutionProjectedPositions(args: {
   positions: ExecutionPositionRow[];
   marketRows: SymbolRow[];
@@ -90,6 +118,12 @@ export function useExecutionProjectedPositions(args: {
           ...row,
           displayValue: row.value,
           displayPnl: row.pnl,
+          displaySl: computeDisplaySl({
+            sl: row.sl,
+            trailingStop: row.trailingStop,
+            side: row.side,
+            currentMarkPrice,
+          }),
           displayUpdatedAt: row.updatedAt,
         };
       }
@@ -102,6 +136,12 @@ export function useExecutionProjectedPositions(args: {
           ...row,
           displayValue: row.value,
           displayPnl: row.pnl,
+          displaySl: computeDisplaySl({
+            sl: row.sl,
+            trailingStop: row.trailingStop,
+            side: row.side,
+            currentMarkPrice,
+          }),
           displayUpdatedAt: row.updatedAt,
         };
       }
@@ -125,6 +165,12 @@ export function useExecutionProjectedPositions(args: {
         markPrice: currentMarkPrice,
         displayValue,
         displayPnl,
+        displaySl: computeDisplaySl({
+          sl: row.sl,
+          trailingStop: row.trailingStop,
+          side: row.side,
+          currentMarkPrice,
+        }),
         displayUpdatedAt,
       };
     });

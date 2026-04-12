@@ -11,6 +11,7 @@ export type ExecutionPositionRow = {
   pnl: number | null;
   tp: number | null;
   sl: number | null;
+  trailingStop: number | null;
   side: string | null;
   size: number | null;
   entryPrice: number | null;
