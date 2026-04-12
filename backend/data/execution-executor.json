@@ -17,7 +17,7 @@
     "exit": "full"
   },
   "running": true,
-  "error": null,
-  "updatedAt": 1776000923986,
+  "error": "Bybit demo REST error: /v5/position/trading-stop",
+  "updatedAt": 1776002004304,
   "positionStates": {}
 }

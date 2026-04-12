@@ -108,8 +108,8 @@ type StoredRawOrder = {
   symbol: string;
   side: string | null;
   orderType: string | null;
+  orderStatus: string | null;
   stopOrderType: string | null;
-  orderFilter: string | null;
   triggerPrice: number | null;
   price: number | null;
   qty: number | null;
@@ -120,6 +120,7 @@ type StoredRawOrder = {
   orderLinkId: string | null;
   orderId: string | null;
   updatedAt: number;
+  placedAt: number | null;
 };
 
 type InstrumentSpec = {
@@ -140,6 +141,10 @@ function deepClone<T>(value: T): T {
 
 function normalizeMode(value: unknown): ExecutionMode {
   return String(value ?? "").trim().toLowerCase() === "real" ? "real" : "demo";
+}
+
+function hasOwn(target: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(target, key);
 }
 
 function readNumber(value: unknown): number | null {
@@ -208,38 +213,6 @@ function readRowUpdatedAt(row: Record<string, unknown>, fallbackTs: number): num
   );
 }
 
-function normalizePositionRow(
-  row: Record<string, unknown>,
-  receivedAt: number,
-): StoredPositionRow | null {
-  const symbol = String(row.symbol ?? "").trim().toUpperCase();
-  const key = toPositionKey(row);
-  const side = String(row.side ?? "").trim().toUpperCase();
-  const size = Math.abs(Number(row.size ?? 0));
-
-  if (!symbol || !Number.isFinite(size) || size <= 0 || !side || side === "NONE") {
-    return null;
-  }
-
-  return {
-    key,
-    symbol,
-    reason: inferReason(row),
-    value: readNumber(row.positionValue ?? row.positionBalance ?? row.positionIM),
-    pnl: readNumber(row.unrealisedPnl),
-    tp: readPositiveNumber(row.takeProfit),
-    sl: readPositiveNumber(row.stopLoss),
-    trailingStop: readPositiveNumber(row.trailingStop),
-    side,
-    size,
-    entryPrice: readPositiveNumber(row.avgPrice),
-    markPrice: readPositiveNumber(row.markPrice),
-    positionIdx: readNumber(row.positionIdx),
-    updatedAt: readRowUpdatedAt(row, receivedAt),
-    leverage: readPositiveNumber(row.leverage),
-  };
-}
-
 function isActiveOrderStatus(value: unknown): boolean {
   const status = String(value ?? "").trim().toUpperCase();
   if (!status) return true;
@@ -257,28 +230,103 @@ function isLimitOrderType(value: unknown): boolean {
   return String(value ?? "").trim().toUpperCase() === "LIMIT";
 }
 
+function normalizePositionRow(
+  row: Record<string, unknown>,
+  receivedAt: number,
+): StoredPositionRow | null {
+  const symbol = String(row.symbol ?? "").trim().toUpperCase();
+  const key = toPositionKey(row);
+  const side = String(row.side ?? "").trim().toUpperCase();
+  const size = Math.abs(Number(row.size ?? 0));
+  if (!symbol || !Number.isFinite(size) || size <= 0 || !side || side === "NONE") {
+    return null;
+  }
+
+  const updatedAt = readRowUpdatedAt(row, receivedAt);
+  return {
+    key,
+    symbol,
+    reason: inferReason(row),
+    value: readNumber(row.positionValue ?? row.positionBalance ?? row.positionIM),
+    pnl: readNumber(row.unrealisedPnl),
+    tp: readPositiveNumber(row.takeProfit),
+    sl: readPositiveNumber(row.stopLoss),
+    trailingStop: readPositiveNumber(row.trailingStop),
+    side,
+    size,
+    entryPrice: readPositiveNumber(row.avgPrice),
+    markPrice: readPositiveNumber(row.markPrice),
+    positionIdx: readNumber(row.positionIdx),
+    updatedAt,
+    leverage: readPositiveNumber(row.leverage),
+  };
+}
+
+function mergePositionPatch(
+  previous: StoredPositionRow | null,
+  row: Record<string, unknown>,
+  receivedAt: number,
+): StoredPositionRow | null {
+  const symbol = String(row.symbol ?? previous?.symbol ?? "").trim().toUpperCase();
+  const key = toPositionKey({
+    symbol,
+    positionIdx: row.positionIdx ?? previous?.positionIdx ?? 0,
+    side: row.side ?? previous?.side ?? "NONE",
+  });
+  const side = String(row.side ?? previous?.side ?? "").trim().toUpperCase();
+  const sizeRaw = hasOwn(row, "size") ? Math.abs(Number(row.size ?? 0)) : previous?.size ?? 0;
+  if (!symbol || !Number.isFinite(sizeRaw) || sizeRaw <= 0 || !side || side === "NONE") {
+    return null;
+  }
+
+  const updatedAt = readRowUpdatedAt(row, receivedAt);
+  return {
+    key,
+    symbol,
+    reason: inferReason(row),
+    value: hasOwn(row, "positionValue")
+      ? readNumber(row.positionValue)
+      : hasOwn(row, "positionBalance")
+        ? readNumber(row.positionBalance)
+        : hasOwn(row, "positionIM")
+          ? readNumber(row.positionIM)
+          : previous?.value ?? null,
+    pnl: hasOwn(row, "unrealisedPnl") ? readNumber(row.unrealisedPnl) : previous?.pnl ?? null,
+    tp: hasOwn(row, "takeProfit") ? readPositiveNumber(row.takeProfit) : previous?.tp ?? null,
+    sl: hasOwn(row, "stopLoss") ? readPositiveNumber(row.stopLoss) : previous?.sl ?? null,
+    trailingStop: hasOwn(row, "trailingStop")
+      ? readPositiveNumber(row.trailingStop)
+      : previous?.trailingStop ?? null,
+    side,
+    size: sizeRaw,
+    entryPrice: hasOwn(row, "avgPrice") ? readPositiveNumber(row.avgPrice) : previous?.entryPrice ?? null,
+    markPrice: hasOwn(row, "markPrice") ? readPositiveNumber(row.markPrice) : previous?.markPrice ?? null,
+    positionIdx: hasOwn(row, "positionIdx") ? readNumber(row.positionIdx) : previous?.positionIdx ?? null,
+    updatedAt,
+    leverage: hasOwn(row, "leverage") ? readPositiveNumber(row.leverage) : previous?.leverage ?? null,
+  };
+}
+
 function normalizeRawOrderRow(
   row: Record<string, unknown>,
   receivedAt: number,
 ): StoredRawOrder | null {
-  if (!isActiveOrderStatus(row.orderStatus)) return null;
-
   const symbol = String(row.symbol ?? "").trim().toUpperCase();
   if (!symbol) return null;
+
+  const orderStatus = String(row.orderStatus ?? "").trim().toUpperCase() || null;
+  if (!isActiveOrderStatus(orderStatus)) return null;
 
   return {
     key: toOrderKey(row),
     symbol,
     side: String(row.side ?? "").trim().toUpperCase() || null,
     orderType: String(row.orderType ?? "").trim().toUpperCase() || null,
+    orderStatus,
     stopOrderType: String(row.stopOrderType ?? "").trim().toUpperCase() || null,
-    orderFilter: String(row.orderFilter ?? "").trim().toUpperCase() || null,
     triggerPrice: readPositiveNumber(row.triggerPrice ?? row.triggerPx ?? row.stopPx),
     price: readPositiveNumber(row.price ?? row.orderPrice),
-    qty:
-      readPositiveNumber(row.qty) ??
-      readPositiveNumber(row.orderQty) ??
-      readPositiveNumber(row.size),
+    qty: readPositiveNumber(row.qty ?? row.orderQty ?? row.size),
     leavesQty: readPositiveNumber(row.leavesQty),
     reduceOnly: readBooleanFlag(row.reduceOnly),
     closeOnTrigger: readBooleanFlag(row.closeOnTrigger),
@@ -286,6 +334,11 @@ function normalizeRawOrderRow(
     orderLinkId: String(row.orderLinkId ?? "").trim() || null,
     orderId: String(row.orderId ?? "").trim() || null,
     updatedAt: readRowUpdatedAt(row, receivedAt),
+    placedAt:
+      readNumber(row.createdTime) ??
+      readNumber(row.createdAt) ??
+      readNumber(row.placeTime) ??
+      readNumber(row.updatedTime),
   };
 }
 
@@ -300,9 +353,8 @@ function normalizeOrderRow(
   const symbol = String(row.symbol ?? "").trim().toUpperCase();
   if (!symbol) return null;
 
-  const leverage =
-    readPositiveNumber(row.leverage) ?? leverageFallbackBySymbol.get(symbol) ?? null;
-
+  const key = toOrderKey(row);
+  const leverage = readPositiveNumber(row.leverage) ?? leverageFallbackBySymbol.get(symbol) ?? null;
   const entryPrice =
     readPositiveNumber(row.price) ??
     readPositiveNumber(row.triggerPrice) ??
@@ -327,7 +379,7 @@ function normalizeOrderRow(
     readPositiveNumber(row.positionBalance);
 
   return {
-    key: toOrderKey(row),
+    key,
     symbol,
     reason: inferReason(row),
     value,
@@ -440,19 +492,6 @@ function computeTrailingDistance(anchorPrice: number, pct: number, tickSize: num
   return Math.max(tickSize, roundNearestToStep(raw, tickSize));
 }
 
-function isRelevantRawExitOrder(order: StoredRawOrder): boolean {
-  const stopOrderType = String(order.stopOrderType ?? "").trim().toUpperCase();
-  const orderFilter = String(order.orderFilter ?? "").trim().toUpperCase();
-  return (
-    order.reduceOnly ||
-    order.closeOnTrigger ||
-    isExecutorOrderLinkId(order.orderLinkId) ||
-    stopOrderType.includes("TAKEPROFIT") ||
-    stopOrderType.includes("STOPLOSS") ||
-    orderFilter === "TPSLORDER"
-  );
-}
-
 function parseInstrumentSpec(raw: Record<string, unknown>): InstrumentSpec {
   const priceFilter = (
     raw.priceFilter && typeof raw.priceFilter === "object" ? raw.priceFilter : {}
@@ -464,10 +503,7 @@ function parseInstrumentSpec(raw: Record<string, unknown>): InstrumentSpec {
   const tickSize = readPositiveNumber(priceFilter.tickSize ?? raw.tickSize) ?? 0.01;
   const qtyStep = readPositiveNumber(lotSizeFilter.qtyStep ?? raw.qtyStep) ?? 0.001;
 
-  return {
-    tickSize,
-    qtyStep,
-  };
+  return { tickSize, qtyStep };
 }
 
 class BybitPrivateExecutionStream {
@@ -487,7 +523,6 @@ class BybitPrivateExecutionStream {
 
   private readonly wsOrders = new Map<string, StoredOrderRow>();
   private readonly orderDeletes = new Map<string, number>();
-
   private readonly wsRawOrders = new Map<string, StoredRawOrder>();
   private readonly rawOrderDeletes = new Map<string, number>();
 
@@ -519,43 +554,50 @@ class BybitPrivateExecutionStream {
     };
   }
 
+  private notifyListeners() {
+    const snapshot = this.getSnapshot();
+    for (const listener of this.listeners) {
+      try {
+        listener(snapshot);
+      } catch {
+        continue;
+      }
+    }
+  }
+
   getSnapshot(): PositionsSnapshot {
-    const positions = this.getMergedPositions().map((row) => ({
-      key: row.key,
-      symbol: row.symbol,
-      reason: row.reason,
-      value: row.value,
-      pnl: row.pnl,
-      tp: row.tp,
-      sl: row.sl,
-      trailingStop: row.trailingStop,
-      side: row.side,
-      size: row.size,
-      entryPrice: row.entryPrice,
-      markPrice: row.markPrice,
-      positionIdx: row.positionIdx,
-      updatedAt: row.updatedAt,
-    }));
-
-    const orders = this.getMergedOrders().map((row) => ({
-      key: row.key,
-      symbol: row.symbol,
-      reason: row.reason,
-      value: row.value,
-      margin: row.margin,
-      leverage: row.leverage,
-      entryPrice: row.entryPrice,
-      placedAt: row.placedAt,
-      updatedAt: row.updatedAt,
-    }));
-
     return {
       mode: this.mode,
       status: this.status,
       updatedAt: this.updatedAt,
       error: this.error,
-      positions,
-      orders,
+      positions: this.getMergedPositions().map((row) => ({
+        key: row.key,
+        symbol: row.symbol,
+        reason: row.reason,
+        value: row.value,
+        pnl: row.pnl,
+        tp: row.tp,
+        sl: row.sl,
+        trailingStop: row.trailingStop,
+        side: row.side,
+        size: row.size,
+        entryPrice: row.entryPrice,
+        markPrice: row.markPrice,
+        positionIdx: row.positionIdx,
+        updatedAt: row.updatedAt,
+      })),
+      orders: this.getMergedOrders().map((row) => ({
+        key: row.key,
+        symbol: row.symbol,
+        reason: row.reason,
+        value: row.value,
+        margin: row.margin,
+        leverage: row.leverage,
+        entryPrice: row.entryPrice,
+        placedAt: row.placedAt,
+        updatedAt: row.updatedAt,
+      })),
     };
   }
 
@@ -563,8 +605,33 @@ class BybitPrivateExecutionStream {
     return this.getMergedPositions();
   }
 
-  getRawOrdersDetailed(): StoredRawOrder[] {
-    return this.getMergedRawOrders();
+  getActiveRawOrders(symbol?: string): StoredRawOrder[] {
+    const rows = Array.from(this.wsRawOrders.values())
+      .filter((row) => {
+        const deleteTs = this.rawOrderDeletes.get(row.key);
+        if (deleteTs != null && row.updatedAt <= deleteTs) return false;
+        if (!isActiveOrderStatus(row.orderStatus)) return false;
+        return true;
+      });
+    return symbol
+      ? rows.filter((row) => row.symbol === String(symbol).trim().toUpperCase())
+      : rows;
+  }
+
+  applySyntheticProtectionUpdate(
+    positionKey: string,
+    patch: Partial<Pick<StoredPositionRow, "tp" | "sl" | "trailingStop">>,
+  ): void {
+    const existing = this.wsPositions.get(positionKey) ?? this.restPositions.get(positionKey);
+    if (!existing) return;
+    const updatedAt = Date.now();
+    this.wsPositions.set(positionKey, {
+      ...existing,
+      ...patch,
+      updatedAt,
+    });
+    this.updatedAt = updatedAt;
+    this.notifyListeners();
   }
 
   ensureStarted(): void {
@@ -577,52 +644,39 @@ class BybitPrivateExecutionStream {
     if (this.shouldRun) return;
     this.shouldRun = true;
     this.startRestRefreshLoop();
-    void this.refreshFromRest("startup");
+    void this.refreshPositionsFromRest("startup");
     this.connectPrivate();
   }
 
-  async forceRefresh(reason: string): Promise<void> {
+  async forceRefreshPositions(reason: string): Promise<void> {
     this.ensureStarted();
-    await this.refreshFromRest(reason);
+    await this.refreshPositionsFromRest(reason);
   }
 
   stop(): void {
     this.shouldRun = false;
-
     if (this.privateReconnectTimer) clearTimeout(this.privateReconnectTimer);
     if (this.privatePingTimer) clearInterval(this.privatePingTimer);
     if (this.restRefreshTimer) clearInterval(this.restRefreshTimer);
-
     this.privateReconnectTimer = null;
     this.privatePingTimer = null;
     this.restRefreshTimer = null;
-
     try {
       this.privateWs?.close();
-    } catch {}
-
-    this.privateWs = null;
-  }
-
-  private notifyListeners() {
-    const snapshot = this.getSnapshot();
-    for (const listener of this.listeners) {
-      try {
-        listener(snapshot);
-      } catch {
-        continue;
-      }
+    } catch {
+      // noop
     }
+    this.privateWs = null;
   }
 
   private startRestRefreshLoop(): void {
     if (this.restRefreshTimer) clearInterval(this.restRefreshTimer);
     this.restRefreshTimer = setInterval(() => {
-      void this.refreshFromRest("interval");
+      void this.refreshPositionsFromRest("interval");
     }, REST_REFRESH_INTERVAL_MS);
   }
 
-  private buildVisiblePositionMap(): Map<string, StoredPositionRow> {
+  private getMergedPositions(): StoredPositionRow[] {
     const visible = new Map<string, StoredPositionRow>();
     const keys = new Set<string>([
       ...this.restPositions.keys(),
@@ -642,38 +696,16 @@ class BybitPrivateExecutionStream {
         visible.set(key, wsRow!);
         continue;
       }
-
       if (restAllowed) {
         visible.set(key, restRow!);
       }
     }
 
-    return visible;
-  }
-
-  private getMergedPositions(): StoredPositionRow[] {
-    return Array.from(this.buildVisiblePositionMap().values()).sort((left, right) => {
+    return Array.from(visible.values()).sort((left, right) => {
       const symbolCmp = left.symbol.localeCompare(right.symbol);
       if (symbolCmp !== 0) return symbolCmp;
       return left.key.localeCompare(right.key);
     });
-  }
-
-  private getMergedRawOrders(): StoredRawOrder[] {
-    const visible = new Map<string, StoredRawOrder>();
-    const keys = new Set<string>([
-      ...this.wsRawOrders.keys(),
-      ...this.rawOrderDeletes.keys(),
-    ]);
-
-    for (const key of keys) {
-      const wsRow = this.wsRawOrders.get(key) ?? null;
-      const deleteTs = this.rawOrderDeletes.get(key) ?? null;
-      const wsAllowed = wsRow != null && (deleteTs == null || wsRow.updatedAt > deleteTs);
-      if (wsAllowed) visible.set(key, wsRow!);
-    }
-
-    return Array.from(visible.values()).sort((left, right) => left.updatedAt - right.updatedAt);
   }
 
   private getMergedOrders(): StoredOrderRow[] {
@@ -687,7 +719,9 @@ class BybitPrivateExecutionStream {
       const wsRow = this.wsOrders.get(key) ?? null;
       const deleteTs = this.orderDeletes.get(key) ?? null;
       const wsAllowed = wsRow != null && (deleteTs == null || wsRow.updatedAt > deleteTs);
-      if (wsAllowed) visible.set(key, wsRow!);
+      if (wsAllowed) {
+        visible.set(key, wsRow!);
+      }
     }
 
     return Array.from(visible.values()).sort((left, right) => {
@@ -705,15 +739,47 @@ class BybitPrivateExecutionStream {
     return fallback;
   }
 
-  private async refreshFromRest(reason: string): Promise<void> {
+  private logWsEvent(kind: string, msg: Record<string, unknown>): void {
+    const items = parseMessageItems(msg.data);
+    const first = items[0] ?? null;
+    const firstSummary = first
+      ? {
+          symbol: String(first.symbol ?? ""),
+          side: String(first.side ?? ""),
+          size: first.size ?? null,
+          takeProfit: first.takeProfit ?? null,
+          stopLoss: first.stopLoss ?? null,
+          trailingStop: first.trailingStop ?? null,
+          price: first.price ?? null,
+          triggerPrice: first.triggerPrice ?? null,
+          orderType: first.orderType ?? null,
+          orderStatus: first.orderStatus ?? null,
+          orderId: first.orderId ?? null,
+          orderLinkId: first.orderLinkId ?? null,
+        }
+      : null;
+
+    this.logger.info(
+      {
+        mode: this.mode,
+        kind,
+        topic: String(msg.topic ?? msg.op ?? ""),
+        success: msg.success ?? null,
+        retMsg: msg.ret_msg ?? null,
+        dataCount: items.length,
+        first: firstSummary,
+      },
+      "private execution ws event",
+    );
+  }
+
+  private async refreshPositionsFromRest(reason: string): Promise<void> {
     if (!this.shouldRun) return;
     if (!this.restClient || !this.restClient.hasCredentials()) return;
 
     try {
       const refreshedAt = Date.now();
-      const positionsResponse = await this.restClient.getPositionsLinear({
-        settleCoin: "USDT",
-      });
+      const positionsResponse = await this.restClient.getPositionsLinear({ settleCoin: "USDT" });
 
       const nextRestPositions = new Map<string, StoredPositionRow>();
       for (const item of Array.isArray(positionsResponse?.list) ? positionsResponse.list : []) {
@@ -729,7 +795,9 @@ class BybitPrivateExecutionStream {
       }
 
       this.updatedAt = refreshedAt;
-      if (this.status !== "missing_credentials") this.error = null;
+      if (this.status !== "missing_credentials") {
+        this.error = null;
+      }
 
       this.logger.info(
         {
@@ -747,7 +815,7 @@ class BybitPrivateExecutionStream {
           reason,
           error: String((error as Error)?.message ?? error),
         },
-        "private execution rest refresh failed",
+        "private execution positions rest refresh failed",
       );
     }
   }
@@ -769,14 +837,6 @@ class BybitPrivateExecutionStream {
 
   private handlePositionFrame(data: unknown): void {
     const receivedAt = Date.now();
-    this.logger.info(
-      {
-        mode: this.mode,
-        kind: "position",
-        data,
-      },
-      "private execution ws event",
-    );
 
     if (Array.isArray(data) && data.length === 0) {
       const visibleKeys = new Set<string>([
@@ -794,14 +854,13 @@ class BybitPrivateExecutionStream {
     }
 
     for (const item of parseMessageItems(data)) {
-      const normalized = normalizePositionRow(item, receivedAt);
       const key = toPositionKey(item);
-
+      const current = this.wsPositions.get(key) ?? this.restPositions.get(key) ?? null;
+      const normalized = mergePositionPatch(current, item, receivedAt);
       if (!normalized) {
         this.markPositionDeleted(key, receivedAt);
         continue;
       }
-
       this.positionDeletes.delete(key);
       this.wsPositions.set(key, normalized);
     }
@@ -815,15 +874,6 @@ class BybitPrivateExecutionStream {
   private handleOrderFrame(data: unknown): void {
     const receivedAt = Date.now();
     const leverageFallbackBySymbol = this.buildLeverageFallbackBySymbol();
-
-    this.logger.info(
-      {
-        mode: this.mode,
-        kind: "order",
-        data,
-      },
-      "private execution ws event",
-    );
 
     for (const item of parseMessageItems(data)) {
       const key = toOrderKey(item);
@@ -864,10 +914,10 @@ class BybitPrivateExecutionStream {
 
     socket.on("open", () => {
       if (this.privateWs !== socket) return;
+      this.logger.info({ mode: this.mode }, "private execution ws open");
       this.status = "authenticating";
       this.error = null;
       this.privateReconnectAttempt = 0;
-      this.logger.info({ mode: this.mode, kind: "open" }, "private execution ws event");
       this.notifyListeners();
 
       const expires = Date.now() + 10_000;
@@ -875,12 +925,10 @@ class BybitPrivateExecutionStream {
         .update(`GET/realtime${expires}`)
         .digest("hex");
 
-      socket.send(
-        JSON.stringify({
-          op: "auth",
-          args: [this.apiKey, expires, signature],
-        }),
-      );
+      socket.send(JSON.stringify({
+        op: "auth",
+        args: [this.apiKey, expires, signature],
+      }));
 
       if (this.privatePingTimer) clearInterval(this.privatePingTimer);
       this.privatePingTimer = setInterval(() => {
@@ -888,7 +936,9 @@ class BybitPrivateExecutionStream {
           if (socket.readyState === WebSocket.OPEN) {
             socket.send(JSON.stringify({ op: "ping" }));
           }
-        } catch {}
+        } catch {
+          // noop
+        }
       }, PRIVATE_WS_PING_INTERVAL_MS);
     });
 
@@ -900,17 +950,15 @@ class BybitPrivateExecutionStream {
         const msg = JSON.parse(raw) as Record<string, unknown>;
 
         if (msg.op === "auth") {
-          this.logger.info({ mode: this.mode, kind: "auth", msg }, "private execution ws event");
+          this.logWsEvent("auth", msg);
           if (msg.success === true) {
             this.status = "subscribing";
             this.error = null;
             this.notifyListeners();
-            socket.send(
-              JSON.stringify({
-                op: "subscribe",
-                args: ["position", "order", "execution"],
-              }),
-            );
+            socket.send(JSON.stringify({
+              op: "subscribe",
+              args: ["position", "order", "execution"],
+            }));
             return;
           }
 
@@ -922,12 +970,12 @@ class BybitPrivateExecutionStream {
         }
 
         if (msg.op === "subscribe") {
-          this.logger.info({ mode: this.mode, kind: "subscribe", msg }, "private execution ws event");
+          this.logWsEvent("subscribe", msg);
           if (msg.success === true) {
             this.status = "connected";
             this.error = null;
             this.notifyListeners();
-            void this.refreshFromRest("subscribe_ok");
+            void this.refreshPositionsFromRest("subscribe_ok");
             return;
           }
 
@@ -938,36 +986,25 @@ class BybitPrivateExecutionStream {
           return;
         }
 
-        if (msg.op === "pong") {
-          this.logger.info({ mode: this.mode, kind: "pong", msg }, "private execution ws event");
-          return;
-        }
-
-        if (msg.op === "unsubscribe") {
-          this.logger.info({ mode: this.mode, kind: "unsubscribe", msg }, "private execution ws event");
+        if (msg.op === "unsubscribe" || msg.op === "pong") {
           return;
         }
 
         if (msg.topic === "position") {
+          this.logWsEvent("position", msg);
           this.handlePositionFrame(msg.data);
           return;
         }
 
         if (msg.topic === "order") {
+          this.logWsEvent("order", msg);
           this.handleOrderFrame(msg.data);
           return;
         }
 
         if (msg.topic === "execution") {
+          this.logWsEvent("execution", msg);
           const receivedAt = Date.now();
-          this.logger.info(
-            {
-              mode: this.mode,
-              kind: "execution",
-              data: msg.data,
-            },
-            "private execution ws event",
-          );
           this.updatedAt = receivedAt;
           this.status = "connected";
           this.error = null;
@@ -975,25 +1012,10 @@ class BybitPrivateExecutionStream {
           return;
         }
 
-        this.logger.info(
-          {
-            mode: this.mode,
-            kind: "other",
-            msg,
-          },
-          "private execution ws event",
-        );
+        this.logWsEvent("other", msg);
       } catch (error) {
         this.status = "error";
         this.error = String((error as Error)?.message ?? error);
-        this.logger.error(
-          {
-            mode: this.mode,
-            raw,
-            error: this.error,
-          },
-          "private execution ws message parse failed",
-        );
         this.notifyListeners();
       }
     });
@@ -1003,7 +1025,6 @@ class BybitPrivateExecutionStream {
       this.privateWs = null;
       if (this.privatePingTimer) clearInterval(this.privatePingTimer);
       this.privatePingTimer = null;
-      this.logger.warn({ mode: this.mode, kind: "close" }, "private execution ws event");
       this.schedulePrivateReconnect();
     });
 
@@ -1011,20 +1032,18 @@ class BybitPrivateExecutionStream {
       if (this.privateWs !== socket) return;
       this.status = "error";
       this.error = String((error as Error)?.message ?? error);
-      this.logger.warn(
-        { mode: this.mode, kind: "error", error: this.error },
-        "private execution socket error",
-      );
+      this.logger.warn({ mode: this.mode, error: this.error }, "private execution socket error");
       this.notifyListeners();
       try {
         socket.close();
-      } catch {}
+      } catch {
+        // noop
+      }
     });
   }
 
   private schedulePrivateReconnect(): void {
     if (!this.shouldRun || !this.hasCredentials()) return;
-
     this.privateReconnectAttempt += 1;
     const delayMs = Math.min(10_000, 1_000 * this.privateReconnectAttempt);
     this.status = "reconnecting";
@@ -1040,11 +1059,9 @@ class BybitPrivateExecutionStream {
 }
 
 class PrivateExecutionExecutorManager {
-  private status: ExecutorRuntimeStatus = executorStore.getState().running ? "waiting_session" : "stopped";
-  private error: string | null = executorStore.getState().error;
-  private activeSettings: ExecutorSettings | null = executorStore.getState().running
-    ? deepClone(executorStore.getSettings())
-    : null;
+  private status: ExecutorRuntimeStatus = "stopped";
+  private error: string | null = null;
+  private activeSettings: ExecutorSettings | null = null;
   private readonly instrumentCache = new Map<string, InstrumentSpec>();
   private readonly recentFingerprints = new Map<string, { fingerprint: string; at: number }>();
   private reconcileInFlight = false;
@@ -1103,6 +1120,7 @@ class PrivateExecutionExecutorManager {
   }
 
   async start(): Promise<ExecutorPublicState> {
+    executorStore.resetPositionStates();
     executorStore.setRunning(true);
     executorStore.setError(null);
     this.error = null;
@@ -1120,28 +1138,13 @@ class PrivateExecutionExecutorManager {
   async stop(): Promise<ExecutorPublicState> {
     executorStore.setRunning(false);
     executorStore.setError(null);
+    executorStore.resetPositionStates();
     this.error = null;
     this.status = "stopped";
     this.activeSettings = null;
     this.queuedReason = null;
     this.recentFingerprints.clear();
     return this.getPublicState();
-  }
-
-  async syncFromPersisted(reason: string): Promise<void> {
-    if (!executorStore.getState().running) {
-      this.status = "stopped";
-      this.activeSettings = null;
-      return;
-    }
-    if (!this.activeSettings) {
-      this.activeSettings = deepClone(executorStore.getSettings());
-    }
-    if (!isRuntimeSessionActive()) {
-      this.status = "waiting_session";
-      return;
-    }
-    await this.activate(reason);
   }
 
   private readonly handleRuntimeState = () => {
@@ -1172,13 +1175,7 @@ class PrivateExecutionExecutorManager {
     this.status = "error";
     this.error = String((error as Error)?.message ?? error);
     executorStore.setError(this.error);
-    this.logger.error(
-      {
-        reason,
-        error: this.error,
-      },
-      "private execution executor reconcile failed",
-    );
+    this.logger.error({ reason, error: this.error }, "private execution executor reconcile failed");
   }
 
   private async activate(reason: string): Promise<void> {
@@ -1193,7 +1190,7 @@ class PrivateExecutionExecutorManager {
       const stream = this.getActiveStream(settings.mode);
       this.status = "starting";
       stream.ensureStarted();
-      await stream.forceRefresh(`executor_${reason}_startup_refresh`);
+      await stream.forceRefreshPositions(`executor_${reason}_startup_refresh`);
       await this.scheduleReconcile(`executor_${reason}`);
       if (executorStore.getState().running && isRuntimeSessionActive() && this.error == null) {
         this.status = "running";
@@ -1215,10 +1212,7 @@ class PrivateExecutionExecutorManager {
   }
 
   private rememberFingerprint(positionKey: string, fingerprint: string): void {
-    this.recentFingerprints.set(positionKey, {
-      fingerprint,
-      at: Date.now(),
-    });
+    this.recentFingerprints.set(positionKey, { fingerprint, at: Date.now() });
   }
 
   private async applyTradingStopPatch(args: {
@@ -1290,94 +1284,89 @@ class PrivateExecutionExecutorManager {
     }
 
     const positions = stream.getPositionsDetailed().filter((row) => Number(row.size ?? 0) > 0);
-    const rawOrders = stream.getRawOrdersDetailed();
     const currentKeys = new Set<string>(positions.map((row) => row.key));
     const staleKeys = Object.keys(executorStore.getState().positionStates).filter((key) => !currentKeys.has(key));
     if (staleKeys.length > 0) {
       executorStore.removePositionStates(staleKeys);
     }
 
-    let actions = 0;
     for (const position of positions) {
-      const symbolOrders = rawOrders.filter((row) => row.symbol === position.symbol);
-      actions += await this.reconcilePosition(position, symbolOrders, settings, restClient);
-    }
-
-    if (actions > 0) {
-      await stream.forceRefresh(`executor_post_action_${reason}`);
+      await this.reconcilePosition(position, stream, settings, restClient);
     }
 
     this.status = "running";
     this.error = null;
     executorStore.setError(null);
+    this.logger.info({ reason, positions: positions.length }, "private execution executor reconcile completed");
   }
 
   private async reconcilePosition(
     position: StoredPositionRow,
-    symbolOrders: StoredRawOrder[],
+    stream: BybitPrivateExecutionStream,
     settings: ExecutorSettings,
     restClient: ExecutionRestClient,
-  ): Promise<number> {
+  ): Promise<void> {
     if (!Number.isFinite(position.entryPrice as number) || Number(position.entryPrice) <= 0) {
-      return 0;
+      return;
     }
     if (!Number.isFinite(position.size as number) || Number(position.size) <= 0) {
       executorStore.setPositionState(position.key, null);
-      return 0;
+      return;
     }
 
     const instrument = await this.getInstrumentSpec(settings.mode, restClient, position.symbol);
     const positionIdx = position.positionIdx != null ? Math.floor(position.positionIdx) : parsePositionIdxFromKey(position.key);
     const tickSize = instrument.tickSize;
     const qtyStep = instrument.qtyStep;
-    const executorOrders = symbolOrders.filter((order) => isExecutorOrderLinkId(order.orderLinkId));
 
     switch (settings.exit) {
       case "trailing":
         executorStore.setPositionState(position.key, null);
-        return await this.ensureTrailingOnly({
+        await this.ensureTrailingOnly({
           position,
+          stream,
           restClient,
           positionIdx,
           distancePct: settings.slPct,
           anchorPrice: Number(position.entryPrice),
           tickSize,
           fingerprint: `trailing:${position.key}:${settings.slPct}`,
-          executorOrders,
         });
+        return;
 
       case "partial_and_trailing":
-        return await this.ensurePartialAndTrailing({
+        await this.ensurePartialAndTrailing({
           position,
-          symbolOrders,
+          stream,
           restClient,
           positionIdx,
           tickSize,
           qtyStep,
           settings,
         });
+        return;
 
       default:
         executorStore.setPositionState(position.key, null);
-        return await this.ensureFullTpSl({
+        await this.ensureFullTpSl({
           position,
+          stream,
           restClient,
           positionIdx,
           tickSize,
           settings,
-          executorOrders,
         });
     }
   }
 
   private async ensureFullTpSl(args: {
     position: StoredPositionRow;
+    stream: BybitPrivateExecutionStream;
     restClient: ExecutionRestClient;
     positionIdx: number;
     tickSize: number;
     settings: ExecutorSettings;
-    executorOrders: StoredRawOrder[];
-  }): Promise<number> {
+  }): Promise<void> {
     const targetTp = roundNearestToStep(
       computeTpPrice(Number(args.position.entryPrice), args.position.side, args.settings.tpPct),
       args.tickSize,
@@ -1391,19 +1380,12 @@ class PrivateExecutionExecutorManager {
     const needsTpUpdate = !sameWithinStep(args.position.tp, targetTp, args.tickSize);
     const needsSlUpdate = !sameWithinStep(args.position.sl, targetSl, args.tickSize);
     const needsTrailingClear = (args.position.trailingStop ?? null) != null;
-    const needsExecutorOrderCancel = args.executorOrders.length > 0;
 
-    if (!needsTpUpdate && !needsSlUpdate && !needsTrailingClear && !needsExecutorOrderCancel) {
-      return 0;
+    if (!needsTpUpdate && !needsSlUpdate && !needsTrailingClear) {
+      return;
     }
     if (this.isDuplicateFingerprint(args.position.key, fingerprint)) {
-      return 0;
-    }
-
-    let actions = 0;
-
-    if (needsExecutorOrderCancel) {
-      actions += await this.cancelOrders(args.restClient, args.position.symbol, args.executorOrders);
+      return;
     }
 
     if (needsTrailingClear) {
@@ -1411,11 +1393,9 @@ class PrivateExecutionExecutorManager {
         restClient: args.restClient,
         symbol: args.position.symbol,
         positionIdx: args.positionIdx,
-        patch: {
-          trailingStop: "0",
-        },
+        patch: { trailingStop: "0" },
       });
-      actions += 1;
+      args.stream.applySyntheticProtectionUpdate(args.position.key, { trailingStop: null });
     }
 
     if (needsTpUpdate) {
@@ -1429,7 +1409,7 @@ class PrivateExecutionExecutorManager {
           tpTriggerBy: "LastPrice",
         },
       });
-      actions += 1;
+      args.stream.applySyntheticProtectionUpdate(args.position.key, { tp: targetTp });
     }
 
     if (needsSlUpdate) {
@@ -1443,43 +1423,33 @@ class PrivateExecutionExecutorManager {
           slTriggerBy: "LastPrice",
         },
       });
-      actions += 1;
+      args.stream.applySyntheticProtectionUpdate(args.position.key, { sl: targetSl });
     }
 
-    if (actions > 0) {
-      this.rememberFingerprint(args.position.key, fingerprint);
-    }
-    return actions;
+    this.rememberFingerprint(args.position.key, fingerprint);
   }
 
   private async ensureTrailingOnly(args: {
     position: StoredPositionRow;
+    stream: BybitPrivateExecutionStream;
     restClient: ExecutionRestClient;
     positionIdx: number;
     distancePct: number;
     anchorPrice: number;
     tickSize: number;
     fingerprint: string;
-    executorOrders: StoredRawOrder[];
-  }): Promise<number> {
+  }): Promise<void> {
     const targetDistance = computeTrailingDistance(args.anchorPrice, args.distancePct, args.tickSize);
     const fingerprint = `${args.fingerprint}:${targetDistance}`;
     const needsTpClear = (args.position.tp ?? null) != null;
     const needsSlClear = (args.position.sl ?? null) != null;
     const needsTrailingUpdate = !sameWithinStep(args.position.trailingStop, targetDistance, args.tickSize);
-    const needsExecutorOrderCancel = args.executorOrders.length > 0;
 
-    if (!needsTpClear && !needsSlClear && !needsTrailingUpdate && !needsExecutorOrderCancel) {
-      return 0;
+    if (!needsTpClear && !needsSlClear && !needsTrailingUpdate) {
+      return;
     }
     if (this.isDuplicateFingerprint(args.position.key, fingerprint)) {
-      return 0;
-    }
-
-    let actions = 0;
-
-    if (needsExecutorOrderCancel) {
-      actions += await this.cancelOrders(args.restClient, args.position.symbol, args.executorOrders);
+      return;
     }
 
     if (needsTpClear) {
@@ -1487,12 +1457,9 @@ class PrivateExecutionExecutorManager {
         restClient: args.restClient,
         symbol: args.position.symbol,
         positionIdx: args.positionIdx,
-        patch: {
-          tpslMode: "Full",
-          takeProfit: "0",
-        },
+        patch: { tpslMode: "Full", takeProfit: "0" },
       });
-      actions += 1;
+      args.stream.applySyntheticProtectionUpdate(args.position.key, { tp: null });
     }
 
     if (needsSlClear) {
@@ -1500,12 +1467,9 @@ class PrivateExecutionExecutorManager {
         restClient: args.restClient,
         symbol: args.position.symbol,
         positionIdx: args.positionIdx,
-        patch: {
-          tpslMode: "Full",
-          stopLoss: "0",
-        },
+        patch: { tpslMode: "Full", stopLoss: "0" },
       });
-      actions += 1;
+      args.stream.applySyntheticProtectionUpdate(args.position.key, { sl: null });
     }
 
     if (needsTrailingUpdate) {
@@ -1513,29 +1477,23 @@ class PrivateExecutionExecutorManager {
         restClient: args.restClient,
         symbol: args.position.symbol,
         positionIdx: args.positionIdx,
-        patch: {
-          tpslMode: "Full",
-          trailingStop: formatForApi(targetDistance),
-        },
+        patch: { tpslMode: "Full", trailingStop: formatForApi(targetDistance) },
       });
-      actions += 1;
+      args.stream.applySyntheticProtectionUpdate(args.position.key, { trailingStop: targetDistance });
     }
 
-    if (actions > 0) {
-      this.rememberFingerprint(args.position.key, fingerprint);
-    }
-    return actions;
+    this.rememberFingerprint(args.position.key, fingerprint);
   }
 
   private async ensurePartialAndTrailing(args: {
     position: StoredPositionRow;
-    symbolOrders: StoredRawOrder[];
+    stream: BybitPrivateExecutionStream;
     restClient: ExecutionRestClient;
     positionIdx: number;
     tickSize: number;
     qtyStep: number;
     settings: ExecutorSettings;
-  }): Promise<number> {
+  }): Promise<void> {
     const persistedState = executorStore.getState().positionStates[args.position.key] ?? null;
     const positionSize = Number(args.position.size);
     const entryPrice = Number(args.position.entryPrice);
@@ -1547,10 +1505,7 @@ class PrivateExecutionExecutorManager {
       computeSlPrice(entryPrice, args.position.side, args.settings.slPct),
       args.tickSize,
     );
-    const targetQty = Math.max(
-      args.qtyStep,
-      roundDownToStep(positionSize * 0.7, args.qtyStep),
-    );
+    const targetQty = Math.max(args.qtyStep, roundDownToStep(positionSize * 0.7, args.qtyStep));
 
     let nextState: ExecutorManagedPositionState = persistedState ?? {
       key: args.position.key,
@@ -1592,22 +1547,22 @@ class PrivateExecutionExecutorManager {
 
     if (nextState.stage === "trailing_active") {
       const trailingAnchorPrice = computeTpPrice(entryPrice, args.position.side, args.settings.tpPct);
-      const actions = await this.ensureTrailingOnly({
+      await this.ensureTrailingOnly({
         position: args.position,
+        stream: args.stream,
         restClient: args.restClient,
         positionIdx: args.positionIdx,
         distancePct: args.settings.tpPct,
         anchorPrice: trailingAnchorPrice,
         tickSize: args.tickSize,
         fingerprint: `partial_trailing:${args.position.key}:${args.settings.tpPct}`,
-        executorOrders: args.symbolOrders.filter((order) => isExecutorOrderLinkId(order.orderLinkId)),
       });
       executorStore.setPositionState(args.position.key, {
         ...nextState,
         lastSize: positionSize,
         updatedAt: Date.now(),
       });
-      return actions;
+      return;
     }
 
     nextState = {
@@ -1618,18 +1573,24 @@ class PrivateExecutionExecutorManager {
     };
     executorStore.setPositionState(args.position.key, nextState);
 
-    const exitOrders = args.symbolOrders.filter(isRelevantRawExitOrder);
     const exitSide = getExitOrderSide(args.position.side);
-    const managedOrder = exitOrders.find((order) => {
+    const rawOrders = args.stream.getActiveRawOrders(args.position.symbol)
+      .filter((order) => {
+        if (order.positionIdx != null && order.positionIdx !== args.positionIdx) return false;
+        return true;
+      });
+
+    const managedOrder = rawOrders.find((order) => {
       if (!isExecutorOrderLinkId(order.orderLinkId)) return false;
       if (String(order.side ?? "").trim().toUpperCase() !== exitSide.toUpperCase()) return false;
-      if (String(order.orderType ?? "").trim().toUpperCase() !== "LIMIT") return false;
-      const orderPrice = order.price ?? order.triggerPrice ?? null;
-      const orderQty = order.qty ?? order.leavesQty ?? null;
-      return sameWithinStep(orderPrice, targetTp, args.tickSize) && sameWithinStep(orderQty, targetQty, args.qtyStep);
+      if (!isLimitOrderType(order.orderType)) return false;
+      return sameWithinStep(order.price, targetTp, args.tickSize) && sameWithinStep(order.qty, targetQty, args.qtyStep);
     }) ?? null;
 
-    const conflictingOrders = exitOrders.filter((order) => order.key !== managedOrder?.key);
+    const conflictingOrders = rawOrders.filter((order) =>
+      isExecutorOrderLinkId(order.orderLinkId) && order.key !== managedOrder?.key,
+    );
+
     const needsTakeProfitClear = (args.position.tp ?? null) != null;
     const needsTrailingClear = (args.position.trailingStop ?? null) != null;
     const needsStopLossUpdate = !sameWithinStep(args.position.sl, targetSl, args.tickSize);
@@ -1637,23 +1598,21 @@ class PrivateExecutionExecutorManager {
     if (!managedOrder || conflictingOrders.length > 0 || needsTakeProfitClear || needsTrailingClear || needsStopLossUpdate) {
       const fingerprint = `partial_pending:${args.position.key}:${targetTp}:${targetSl}:${targetQty}`;
       if (this.isDuplicateFingerprint(args.position.key, fingerprint)) {
-        return 0;
+        return;
       }
 
-      let actions = 0;
-      actions += await this.cancelOrders(args.restClient, args.position.symbol, conflictingOrders);
+      for (const order of conflictingOrders) {
+        await this.cancelTrackedOrder(args.restClient, args.position.symbol, order);
+      }
 
       if (needsTakeProfitClear) {
         await this.applyTradingStopPatch({
           restClient: args.restClient,
           symbol: args.position.symbol,
           positionIdx: args.positionIdx,
-          patch: {
-            tpslMode: "Full",
-            takeProfit: "0",
-          },
+          patch: { tpslMode: "Full", takeProfit: "0" },
         });
-        actions += 1;
+        args.stream.applySyntheticProtectionUpdate(args.position.key, { tp: null });
       }
 
       if (needsTrailingClear) {
@@ -1661,11 +1620,9 @@ class PrivateExecutionExecutorManager {
           restClient: args.restClient,
           symbol: args.position.symbol,
           positionIdx: args.positionIdx,
-          patch: {
-            trailingStop: "0",
-          },
+          patch: { trailingStop: "0" },
         });
-        actions += 1;
+        args.stream.applySyntheticProtectionUpdate(args.position.key, { trailingStop: null });
       }
 
       if (needsStopLossUpdate) {
@@ -1679,7 +1636,7 @@ class PrivateExecutionExecutorManager {
             slTriggerBy: "LastPrice",
           },
         });
-        actions += 1;
+        args.stream.applySyntheticProtectionUpdate(args.position.key, { sl: targetSl });
       }
 
       if (!managedOrder) {
@@ -1687,10 +1644,10 @@ class PrivateExecutionExecutorManager {
           {
             symbol: args.position.symbol,
             positionIdx: args.positionIdx,
-            targetQty,
-            targetTp,
+            price: targetTp,
+            qty: targetQty,
           },
-          "private execution executor place partial tp order",
+          "private execution executor place partial limit order",
         );
         await args.restClient.placeOrderLinear({
           symbol: args.position.symbol,
@@ -1703,44 +1660,29 @@ class PrivateExecutionExecutorManager {
           positionIdx: args.positionIdx,
           orderLinkId: `${EXECUTOR_ORDER_LINK_PREFIX}:partial:${args.position.symbol}:${Date.now()}`,
         });
-        actions += 1;
       }
 
-      if (actions > 0) {
-        this.rememberFingerprint(args.position.key, fingerprint);
-      }
-      return actions;
+      this.rememberFingerprint(args.position.key, fingerprint);
     }
-
-    return 0;
   }
 
-  private async cancelOrders(
+  private async cancelTrackedOrder(
     restClient: ExecutionRestClient,
     symbol: string,
-    orders: StoredRawOrder[],
-  ): Promise<number> {
-    let cancelled = 0;
-    for (const order of orders) {
-      const orderId = String(order.orderId ?? "").trim();
-      const orderLinkId = String(order.orderLinkId ?? "").trim();
-      if (!orderId && !orderLinkId) continue;
-      this.logger.info(
-        {
-          symbol,
-          orderId: orderId || null,
-          orderLinkId: orderLinkId || null,
-        },
-        "private execution executor cancel order",
-      );
-      await restClient.cancelOrderLinear({
-        symbol,
-        ...(orderId ? { orderId } : {}),
-        ...(orderLinkId ? { orderLinkId } : {}),
-      });
-      cancelled += 1;
-    }
-    return cancelled;
+    order: StoredRawOrder,
+  ): Promise<void> {
+    const orderId = String(order.orderId ?? "").trim();
+    const orderLinkId = String(order.orderLinkId ?? "").trim();
+    if (!orderId && !orderLinkId) return;
+    this.logger.info(
+      { symbol, orderId: orderId || null, orderLinkId: orderLinkId || null },
+      "private execution executor cancel tracked order",
+    );
+    await restClient.cancelOrderLinear({
+      symbol,
+      ...(orderId ? { orderId } : {}),
+      ...(orderLinkId ? { orderLinkId } : {}),
+    });
   }
 
   private async getInstrumentSpec(
@@ -1768,7 +1710,7 @@ function fallbackExecutorState(): ExecutorPublicState {
     settings: persisted.settings,
     activeSettings: null,
     desiredRunning: persisted.running,
-    status: persisted.running ? "waiting_session" : "stopped",
+    status: "stopped",
     error: persisted.error,
     updatedAt: persisted.updatedAt,
   };
@@ -1851,7 +1793,7 @@ export function createPrivatePositionsWs(app: {
 
     realStream.ensureStarted();
     demoStream.ensureStarted();
-    await executorManager?.syncFromPersisted("app_ready");
+    await executorManager?.stop();
 
     broadcastTimer = setInterval(() => {
       broadcastSnapshots();
@@ -1868,7 +1810,6 @@ export function createPrivatePositionsWs(app: {
       })();
 
       clients.set(ws, mode);
-
       safeSend(ws, {
         type: "hello",
         payload: getStream(mode).getSnapshot(),
