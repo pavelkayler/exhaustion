@@ -198,12 +198,12 @@ export function ExecutionSettingsCard({
           </Col>
           <Col md={4}>
             <Form.Group>
-              <Form.Label>Stale sec</Form.Label>
+              <Form.Label>Order Alive min</Form.Label>
               <Form.Control
                 type="number"
                 step="1"
-                value={settings.staleSec}
-                onChange={(event) => onUpdateNumber("staleSec", event.target.value)}
+                value={settings.orderAliveMin}
+                onChange={(event) => onUpdateNumber("orderAliveMin", event.target.value)}
               />
             </Form.Group>
           </Col>
@@ -245,7 +245,7 @@ export function ExecutionSettingsCard({
           />
           <Form.Check
             type="checkbox"
-            label="Cancel active position orders"
+            label="Cancel stale entry orders"
             checked={settings.cancelActivePositionOrders}
             onChange={(event) =>
               onUpdateBoolean("cancelActivePositionOrders", event.target.checked)

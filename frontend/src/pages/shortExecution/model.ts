@@ -11,7 +11,7 @@ export const DEFAULT_EXECUTOR_LOCAL_SETTINGS: ExecutorLocalSettings = {
   firstOrderOffsetPct: 0.6,
   gridOrdersCount: 2,
   gridStepPct: 1.2,
-  staleSec: 120,
+  orderAliveMin: 2,
   cooldownMin: 20,
   trackCandidateSignalsForResearch: false,
   takeCandidateSignalsInLiveExecution: true,
@@ -28,5 +28,5 @@ export type NumericFieldKey =
   | "firstOrderOffsetPct"
   | "gridOrdersCount"
   | "gridStepPct"
-  | "staleSec"
+  | "orderAliveMin"
   | "cooldownMin";

@@ -94,6 +94,9 @@ type ExecutionRestClient = {
     cursor?: string;
   }): Promise<{ list: Array<Record<string, unknown>> }>;
   getInstrumentsInfoLinear(params?: { symbol?: string }): Promise<Array<Record<string, unknown>>>;
+  placeOrderLinear(params: Record<string, unknown>): Promise<Record<string, unknown>>;
+  cancelOrderLinear(params: Record<string, unknown>): Promise<unknown>;
+  setLeverageLinear(params: Record<string, unknown>): Promise<unknown>;
   setTradingStopLinear(params: Record<string, unknown>): Promise<unknown>;
 };
 
@@ -103,6 +106,8 @@ type StoredPositionRow = ExecutionPositionRow & {
 };
 
 type StoredOrderRow = ExecutionOrderRow & {
+  orderId: string | null;
+  orderLinkId: string | null;
   side: string | null;
   orderType: string | null;
   updatedAt: number;
@@ -126,6 +131,8 @@ const CLIENT_BROADCAST_INTERVAL_MS = 1_000;
 const REST_REFRESH_INTERVAL_MS = 60_000;
 const TRAILING_RECONCILE_RETRY_MS = 5_000;
 const TRAILING_RECONCILE_DEBOUNCE_MS = 250;
+const ORDER_MAINTENANCE_INTERVAL_MS = 30_000;
+const EXECUTOR_ORDER_LINK_PREFIX = "executor";
 
 function deepClone<T>(value: T): T {
   return structuredClone(value);
@@ -365,6 +372,8 @@ function normalizeOrderRow(
       ?? readNumber(row.placeTime)
       ?? readNumber(row.updatedTime),
     updatedAt: readRowUpdatedAt(row, receivedAt),
+    orderId: String(row.orderId ?? "").trim() || null,
+    orderLinkId: String(row.orderLinkId ?? "").trim() || null,
     side: String(row.side ?? "").trim().toUpperCase() || null,
     orderType: String(row.orderType ?? "").trim().toUpperCase() || null,
   };
@@ -434,6 +443,72 @@ function computeSlPrice(entryPrice: number, side: string | null, slPct: number):
 
 function computeTrailingDistance(entryPrice: number, slPct: number): number {
   return entryPrice * (Math.max(0, slPct) / 100);
+}
+
+function roundDownToStep(value: number, step: number): number {
+  if (!Number.isFinite(value)) return 0;
+  if (!Number.isFinite(step) || step <= 0) return value;
+  const precision = stepPrecision(step);
+  return Number((Math.floor(value / step) * step).toFixed(precision));
+}
+
+function normalizeSignalState(value: unknown): string {
+  return String(value ?? "").trim().toUpperCase();
+}
+
+function isCandidateSignalState(state: string): boolean {
+  return state === "CANDIDATE" || state === "WATCHLIST" || state === "CONFIRMED";
+}
+
+function isFinalSignalState(state: string): boolean {
+  return state === "SOFT_FINAL" || state === "FINAL";
+}
+
+function resolveSignalExecutionReason(state: string): ExecutionReason | null {
+  if (isFinalSignalState(state)) return "final";
+  if (isCandidateSignalState(state)) return "candidate";
+  return null;
+}
+
+function resolveSignalReferencePrice(payload: Record<string, unknown>): number | null {
+  const priceContext = (
+    payload.priceContext && typeof payload.priceContext === "object" ? payload.priceContext : {}
+  ) as Record<string, unknown>;
+  const snapshot = (
+    payload.snapshot && typeof payload.snapshot === "object" ? payload.snapshot : {}
+  ) as Record<string, unknown>;
+  const metrics = (
+    snapshot.metrics && typeof snapshot.metrics === "object" ? snapshot.metrics : {}
+  ) as Record<string, unknown>;
+  return (
+    readPositiveNumber(priceContext.midPrice)
+    ?? readPositiveNumber(priceContext.markPrice)
+    ?? readPositiveNumber(priceContext.lastPrice)
+    ?? readPositiveNumber(metrics.markPrice)
+    ?? readPositiveNumber(metrics.lastPrice)
+  );
+}
+
+function isExecutorManagedOrder(row: StoredOrderRow): boolean {
+  return row.reason === "candidate" || row.reason === "final";
+}
+
+function buildExecutorOrderLinkId(reason: ExecutionReason, symbol: string, batchTs: number, index: number): string {
+  return `${EXECUTOR_ORDER_LINK_PREFIX}_${reason}_${symbol}_${batchTs}_${index}`;
+}
+
+function buildCancelOrderParams(row: StoredOrderRow): Record<string, unknown> | null {
+  if (row.orderId) {
+    return { symbol: row.symbol, orderId: row.orderId };
+  }
+  if (row.orderLinkId) {
+    return { symbol: row.symbol, orderLinkId: row.orderLinkId };
+  }
+  return null;
+}
+
+function computeShortEntryPrice(referencePrice: number, offsetPct: number): number {
+  return referencePrice * (1 + (Math.max(0, offsetPct) / 100));
 }
 
 function mergeStoredPositionRows(
@@ -573,6 +648,10 @@ class BybitPrivateExecutionStream {
 
   getPositionsDetailed(): StoredPositionRow[] {
     return this.getMergedPositions();
+  }
+
+  getOrdersDetailed(): StoredOrderRow[] {
+    return this.getMergedOrders();
   }
 
   applyOptimisticProtection(key: string, patch: { tp?: number | null; sl?: number | null; trailingStop?: number | null }): void {
@@ -1061,7 +1140,14 @@ class PrivateExecutionExecutorManager {
   private activeSettings: ExecutorSettings | null = null;
   private readonly instrumentCache = new Map<string, InstrumentSpec>();
   private readonly streamUnsubscribes: Array<() => void> = [];
+  private readonly openSymbolsByMode: Record<ExecutionMode, Set<string>> = {
+    demo: new Set<string>(),
+    real: new Set<string>(),
+  };
+  private readonly lastClosedAtByModeSymbol = new Map<string, number>();
+  private readonly signalInFlightByModeSymbol = new Set<string>();
   private trailingReconcileTimer: NodeJS.Timeout | null = null;
+  private orderMaintenanceTimer: NodeJS.Timeout | null = null;
   private trailingReconcileInFlight = false;
 
   constructor(
@@ -1070,6 +1156,7 @@ class PrivateExecutionExecutorManager {
     private readonly realStream: BybitPrivateExecutionStream,
   ) {
     runtime.on("state", this.handleRuntimeState);
+    runtime.on("event", this.handleRuntimeEvent);
     this.streamUnsubscribes.push(
       this.demoStream.addListener(() => {
         this.handleStreamSnapshot("demo");
@@ -1082,6 +1169,7 @@ class PrivateExecutionExecutorManager {
 
   dispose(): void {
     runtime.off("state", this.handleRuntimeState);
+    runtime.off("event", this.handleRuntimeEvent);
     for (const unsubscribe of this.streamUnsubscribes) {
       try {
         unsubscribe();
@@ -1089,7 +1177,7 @@ class PrivateExecutionExecutorManager {
         continue;
       }
     }
-    this.clearTrailingReconcileTimer();
+    this.clearRuntimeTimers();
   }
 
   resetOnBoot(): void {
@@ -1099,7 +1187,11 @@ class PrivateExecutionExecutorManager {
     this.status = "stopped";
     this.error = null;
     this.activeSettings = null;
-    this.clearTrailingReconcileTimer();
+    this.signalInFlightByModeSymbol.clear();
+    this.lastClosedAtByModeSymbol.clear();
+    this.openSymbolsByMode.demo.clear();
+    this.openSymbolsByMode.real.clear();
+    this.clearRuntimeTimers();
   }
 
   getPublicState(): ExecutorPublicState {
@@ -1146,7 +1238,8 @@ class PrivateExecutionExecutorManager {
     this.error = null;
     this.status = "stopped";
     this.activeSettings = null;
-    this.clearTrailingReconcileTimer();
+    this.signalInFlightByModeSymbol.clear();
+    this.clearRuntimeTimers();
     return this.getPublicState();
   }
 
@@ -1154,33 +1247,80 @@ class PrivateExecutionExecutorManager {
     if (!executorStore.getState().running) {
       this.status = "stopped";
       this.activeSettings = null;
-      this.clearTrailingReconcileTimer();
+      this.clearRuntimeTimers();
       return;
     }
     if (!isRuntimeSessionActive()) {
       this.status = "waiting_session";
-      this.clearTrailingReconcileTimer();
+      this.clearRuntimeTimers();
       return;
     }
     if (this.status === "waiting_session") {
       void this.activate("runtime_ready");
       return;
     }
+    this.ensureOrderMaintenanceTimer();
     this.scheduleTrailingReconcile("runtime_state", TRAILING_RECONCILE_DEBOUNCE_MS);
   };
 
+  private readonly handleRuntimeEvent = (event: unknown) => {
+    void this.processSignalTransitionEvent(event).catch((error) => {
+      this.logger.error(
+        { mode: this.activeSettings?.mode ?? "demo", error: String((error as Error)?.message ?? error) },
+        "private execution executor signal processing failed",
+      );
+    });
+  };
+
   private handleStreamSnapshot(mode: ExecutionMode): void {
+    this.notePositionClosures(mode);
     const settings = this.activeSettings;
     if (!executorStore.getState().running) return;
     if (!isRuntimeSessionActive()) return;
-    if (!settings || settings.exit !== "trailing" || settings.mode !== mode) return;
+    if (!settings || settings.mode !== mode) return;
+    this.ensureOrderMaintenanceTimer();
     this.scheduleTrailingReconcile("stream_update", TRAILING_RECONCILE_DEBOUNCE_MS);
+  }
+
+  private clearRuntimeTimers(): void {
+    this.clearTrailingReconcileTimer();
+    if (this.orderMaintenanceTimer) {
+      clearInterval(this.orderMaintenanceTimer);
+      this.orderMaintenanceTimer = null;
+    }
   }
 
   private clearTrailingReconcileTimer(): void {
     if (this.trailingReconcileTimer) {
       clearTimeout(this.trailingReconcileTimer);
       this.trailingReconcileTimer = null;
+    }
+  }
+
+  private ensureOrderMaintenanceTimer(): void {
+    if (this.orderMaintenanceTimer) return;
+    this.orderMaintenanceTimer = setInterval(() => {
+      void this.runOrderMaintenanceTick();
+    }, ORDER_MAINTENANCE_INTERVAL_MS);
+  }
+
+  private async runOrderMaintenanceTick(): Promise<void> {
+    const settings = this.activeSettings;
+    if (!executorStore.getState().running) return;
+    if (!settings) return;
+    if (!isRuntimeSessionActive()) return;
+    try {
+      if (settings.cancelActivePositionOrders) {
+        await this.cancelStaleOrdersIfNeeded("order_alive_tick");
+      }
+      if (settings.exit === "trailing") {
+        this.scheduleTrailingReconcile("order_maintenance", 0);
+      }
+    } catch (error) {
+      this.logger.error(
+        { mode: settings.mode, error: String((error as Error)?.message ?? error) },
+        "private execution executor order maintenance failed",
+      );
     }
   }
 
@@ -1228,6 +1368,48 @@ class PrivateExecutionExecutorManager {
     return mode === "real" ? this.realStream : this.demoStream;
   }
 
+  private getCooldownKey(mode: ExecutionMode, symbol: string): string {
+    return `${mode}:${symbol}`;
+  }
+
+  private getOpenSymbolsForStream(stream: BybitPrivateExecutionStream): Set<string> {
+    const next = new Set<string>();
+    for (const row of stream.getPositionsDetailed()) {
+      if (Number(row.size ?? 0) <= 0) continue;
+      next.add(row.symbol);
+    }
+    return next;
+  }
+
+  private syncOpenSymbols(mode: ExecutionMode): void {
+    const stream = this.getActiveStream(mode);
+    this.openSymbolsByMode[mode] = this.getOpenSymbolsForStream(stream);
+  }
+
+  private notePositionClosures(mode: ExecutionMode): void {
+    const stream = this.getActiveStream(mode);
+    const next = this.getOpenSymbolsForStream(stream);
+    const prev = this.openSymbolsByMode[mode];
+    const now = Date.now();
+    for (const symbol of prev) {
+      if (!next.has(symbol)) {
+        this.lastClosedAtByModeSymbol.set(this.getCooldownKey(mode, symbol), now);
+        this.logger.info(
+          { mode, symbol, closedAt: now },
+          "private execution executor cooldown started after position close",
+        );
+      }
+    }
+    this.openSymbolsByMode[mode] = next;
+  }
+
+  private isCooldownActive(mode: ExecutionMode, symbol: string, settings: ExecutorSettings): boolean {
+    if (!(settings.cooldownMin > 0)) return false;
+    const closedAt = this.lastClosedAtByModeSymbol.get(this.getCooldownKey(mode, symbol));
+    if (!(closedAt && closedAt > 0)) return false;
+    return (Date.now() - closedAt) < settings.cooldownMin * 60_000;
+  }
+
   private async activate(reason: string): Promise<void> {
     if (!executorStore.getState().running) return;
     if (!isRuntimeSessionActive()) {
@@ -1241,6 +1423,7 @@ class PrivateExecutionExecutorManager {
 
     this.status = "starting";
     await stream.forceRefresh(`executor_${reason}_startup_refresh`, { includeOrders: true });
+    this.syncOpenSymbols(settings.mode);
 
     if (settings.exit === "full") {
       await this.reconcileFullAtStart(stream, settings);
@@ -1253,9 +1436,257 @@ class PrivateExecutionExecutorManager {
       }
     }
 
+    if (settings.cancelActivePositionOrders) {
+      await this.cancelStaleOrdersIfNeeded(`executor_${reason}_order_alive`);
+    }
+
+    this.ensureOrderMaintenanceTimer();
     this.status = "running";
     this.error = null;
     executorStore.setError(null);
+  }
+
+  private async processSignalTransitionEvent(event: unknown): Promise<void> {
+    const settings = this.activeSettings;
+    if (!executorStore.getState().running) return;
+    if (!settings) return;
+    if (!isRuntimeSessionActive()) return;
+
+    const source = (event && typeof event === "object" ? event : {}) as Record<string, unknown>;
+    if (String(source.type ?? "").trim().toUpperCase() !== "SHORT_SIGNAL_TRANSITION") return;
+
+    const payload = (source.payload && typeof source.payload === "object" ? source.payload : {}) as Record<string, unknown>;
+    const snapshot = (payload.snapshot && typeof payload.snapshot === "object" ? payload.snapshot : {}) as Record<string, unknown>;
+    const nextState = normalizeSignalState(payload.nextState ?? snapshot.state);
+    if (!nextState || nextState === "SUPPRESSED") return;
+
+    const advisoryVerdict = normalizeSignalState(snapshot.advisoryVerdict ?? ((snapshot.metrics && typeof snapshot.metrics === "object") ? (snapshot.metrics as Record<string, unknown>).advisoryVerdict : null));
+    if (advisoryVerdict !== "TRADEABLE") return;
+
+    const reason = resolveSignalExecutionReason(nextState);
+    if (!reason) return;
+    if (reason === "candidate" && !settings.takeCandidateSignalsInLiveExecution) return;
+    if (reason === "final" && !settings.takeFinalSignals) return;
+
+    const symbol = String(source.symbol ?? snapshot.symbol ?? "").trim().toUpperCase();
+    if (!symbol) return;
+
+    const referencePrice = resolveSignalReferencePrice(payload);
+    if (!(referencePrice && referencePrice > 0)) {
+      this.logger.warn(
+        { mode: settings.mode, symbol, nextState },
+        "private execution executor skipped signal: missing reference price",
+      );
+      return;
+    }
+
+    const signalKey = `${settings.mode}:${symbol}`;
+    if (this.signalInFlightByModeSymbol.has(signalKey)) {
+      this.logger.info(
+        { mode: settings.mode, symbol, nextState },
+        "private execution executor skipped signal: processing already in flight",
+      );
+      return;
+    }
+
+    this.signalInFlightByModeSymbol.add(signalKey);
+    try {
+      await this.handleTradeableSignal({
+        settings,
+        symbol,
+        reason,
+        state: nextState,
+        referencePrice,
+        transitionReason: String(payload.transitionReason ?? snapshot.summaryReason ?? "").trim() || null,
+      });
+    } finally {
+      this.signalInFlightByModeSymbol.delete(signalKey);
+    }
+  }
+
+  private async handleTradeableSignal(args: {
+    settings: ExecutorSettings;
+    symbol: string;
+    reason: ExecutionReason;
+    state: string;
+    referencePrice: number;
+    transitionReason: string | null;
+  }): Promise<void> {
+    const stream = this.getActiveStream(args.settings.mode);
+    const restClient = stream.getRestClient();
+    if (!restClient || !restClient.hasCredentials()) {
+      throw new Error("missing_credentials");
+    }
+
+    const hasOpenPosition = stream.getPositionsDetailed().some((row) => row.symbol === args.symbol && Number(row.size ?? 0) > 0);
+    if (hasOpenPosition) {
+      this.logger.info(
+        { mode: args.settings.mode, symbol: args.symbol, state: args.state },
+        "private execution executor skipped signal: position already open",
+      );
+      return;
+    }
+
+    if (this.isCooldownActive(args.settings.mode, args.symbol, args.settings)) {
+      this.logger.info(
+        { mode: args.settings.mode, symbol: args.symbol, state: args.state, cooldownMin: args.settings.cooldownMin },
+        "private execution executor skipped signal: cooldown active",
+      );
+      return;
+    }
+
+    const canceled = await this.cancelExecutorOrdersForSymbol(stream, restClient, args.symbol, "replace_on_signal");
+    await stream.forceRefresh(`signal_${args.symbol}_pre_place_refresh`, { includeOrders: true });
+    await this.placeSignalEntryGrid(stream, restClient, args);
+    this.logger.info(
+      {
+        mode: args.settings.mode,
+        symbol: args.symbol,
+        state: args.state,
+        reason: args.reason,
+        transitionReason: args.transitionReason,
+        canceledOrders: canceled,
+      },
+      "private execution executor signal grid placed",
+    );
+  }
+
+  private async cancelExecutorOrdersForSymbol(
+    stream: BybitPrivateExecutionStream,
+    restClient: ExecutionRestClient,
+    symbol: string,
+    reason: string,
+  ): Promise<number> {
+    const targetOrders = stream.getOrdersDetailed().filter((row) => row.symbol === symbol && isExecutorManagedOrder(row));
+    let canceled = 0;
+    for (const order of targetOrders) {
+      const cancelParams = buildCancelOrderParams(order);
+      if (!cancelParams) continue;
+      this.logger.info(
+        { mode: this.activeSettings?.mode ?? "demo", symbol, reason, cancelParams },
+        "private execution executor cancel entry order",
+      );
+      await restClient.cancelOrderLinear(cancelParams);
+      canceled += 1;
+    }
+    return canceled;
+  }
+
+  private async cancelStaleOrdersIfNeeded(reason: string): Promise<void> {
+    const settings = this.activeSettings;
+    if (!settings || !settings.cancelActivePositionOrders) return;
+    const stream = this.getActiveStream(settings.mode);
+    const restClient = stream.getRestClient();
+    if (!restClient || !restClient.hasCredentials()) return;
+
+    const now = Date.now();
+    const ttlMs = Math.max(1, settings.orderAliveMin) * 60_000;
+    const staleOrders = stream.getOrdersDetailed().filter((row) => (
+      isExecutorManagedOrder(row)
+      && Number(row.placedAt ?? 0) > 0
+      && (now - Number(row.placedAt)) >= ttlMs
+    ));
+
+    if (staleOrders.length === 0) return;
+
+    for (const order of staleOrders) {
+      const cancelParams = buildCancelOrderParams(order);
+      if (!cancelParams) continue;
+      this.logger.info(
+        {
+          mode: settings.mode,
+          symbol: order.symbol,
+          reason,
+          orderKey: order.key,
+          ageMs: now - Number(order.placedAt ?? now),
+          orderAliveMin: settings.orderAliveMin,
+        },
+        "private execution executor cancel stale entry order",
+      );
+      await restClient.cancelOrderLinear(cancelParams);
+    }
+  }
+
+  private async placeSignalEntryGrid(
+    stream: BybitPrivateExecutionStream,
+    restClient: ExecutionRestClient,
+    args: {
+      settings: ExecutorSettings;
+      symbol: string;
+      reason: ExecutionReason;
+      state: string;
+      referencePrice: number;
+      transitionReason: string | null;
+    },
+  ): Promise<void> {
+    const instrument = await this.getInstrumentSpec(args.settings.mode, restClient, args.symbol);
+    const ordersCount = Math.max(1, Math.floor(Number(args.settings.gridOrdersCount) || 0));
+    const marginPerOrder = args.settings.maxUsdt / ordersCount;
+    if (!(marginPerOrder > 0) || !(args.settings.leverage > 0)) {
+      throw new Error("invalid_executor_order_budget");
+    }
+
+    await restClient.setLeverageLinear({
+      symbol: args.symbol,
+      buyLeverage: formatForApi(args.settings.leverage),
+      sellLeverage: formatForApi(args.settings.leverage),
+    });
+
+    const createdOrderLinkIds: string[] = [];
+    const batchTs = Date.now();
+
+    try {
+      for (let index = 0; index < ordersCount; index += 1) {
+        const offsetPct = Number(args.settings.firstOrderOffsetPct) + index * Number(args.settings.gridStepPct);
+        const rawPrice = computeShortEntryPrice(args.referencePrice, offsetPct);
+        const price = roundNearestToStep(rawPrice, instrument.tickSize);
+        if (!(price > 0)) {
+          throw new Error(`invalid_entry_price:${args.symbol}:${index + 1}`);
+        }
+
+        const rawQty = (marginPerOrder * Number(args.settings.leverage)) / price;
+        const qty = roundDownToStep(rawQty, instrument.qtyStep);
+        if (!(qty > 0)) {
+          throw new Error(`invalid_entry_qty:${args.symbol}:${index + 1}`);
+        }
+
+        const orderLinkId = buildExecutorOrderLinkId(args.reason, args.symbol, batchTs, index + 1);
+        createdOrderLinkIds.push(orderLinkId);
+
+        const request = {
+          symbol: args.symbol,
+          side: "Sell",
+          orderType: "Limit",
+          price: formatForApi(price),
+          qty: formatForApi(qty),
+          timeInForce: "GTC",
+          positionIdx: 2,
+          orderLinkId,
+        };
+
+        this.logger.info(
+          {
+            mode: args.settings.mode,
+            symbol: args.symbol,
+            state: args.state,
+            reason: args.reason,
+            request,
+          },
+          "private execution executor place signal entry order",
+        );
+        await restClient.placeOrderLinear(request);
+      }
+    } catch (error) {
+      const message = String((error as Error)?.message ?? error);
+      for (const orderLinkId of createdOrderLinkIds) {
+        try {
+          await restClient.cancelOrderLinear({ symbol: args.symbol, orderLinkId });
+        } catch {
+          continue;
+        }
+      }
+      throw new Error(message);
+    }
   }
 
   private async reconcileFullAtStart(

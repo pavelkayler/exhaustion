@@ -13,7 +13,7 @@ export type ExecutorSettings = {
   firstOrderOffsetPct: number;
   gridOrdersCount: number;
   gridStepPct: number;
-  staleSec: number;
+  orderAliveMin: number;
   cooldownMin: number;
   trackCandidateSignalsForResearch: boolean;
   takeCandidateSignalsInLiveExecution: boolean;
@@ -100,7 +100,7 @@ export const DEFAULT_EXECUTOR_SETTINGS: ExecutorSettings = {
   firstOrderOffsetPct: 0.6,
   gridOrdersCount: 2,
   gridStepPct: 1.2,
-  staleSec: 120,
+  orderAliveMin: 2,
   cooldownMin: 20,
   trackCandidateSignalsForResearch: false,
   takeCandidateSignalsInLiveExecution: true,
@@ -108,6 +108,17 @@ export const DEFAULT_EXECUTOR_SETTINGS: ExecutorSettings = {
   cancelActivePositionOrders: true,
   exit: "full",
 };
+
+function normalizeOrderAliveMin(source: Record<string, unknown>): number {
+  if (Object.prototype.hasOwnProperty.call(source, "orderAliveMin")) {
+    return Math.max(1, Math.floor(readFiniteNumber(source.orderAliveMin, DEFAULT_EXECUTOR_SETTINGS.orderAliveMin)));
+  }
+  if (Object.prototype.hasOwnProperty.call(source, "staleSec")) {
+    const legacySeconds = Math.max(1, Math.floor(readFiniteNumber(source.staleSec, DEFAULT_EXECUTOR_SETTINGS.orderAliveMin * 60)));
+    return Math.max(1, Math.round(legacySeconds / 60));
+  }
+  return DEFAULT_EXECUTOR_SETTINGS.orderAliveMin;
+}
 
 function normalizeSettings(raw: unknown): ExecutorSettings {
   const source = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
@@ -126,7 +137,7 @@ function normalizeSettings(raw: unknown): ExecutorSettings {
       Math.floor(readFiniteNumber(source.gridOrdersCount, DEFAULT_EXECUTOR_SETTINGS.gridOrdersCount)),
     ),
     gridStepPct: Math.max(0, readFiniteNumber(source.gridStepPct, DEFAULT_EXECUTOR_SETTINGS.gridStepPct)),
-    staleSec: Math.max(1, Math.floor(readFiniteNumber(source.staleSec, DEFAULT_EXECUTOR_SETTINGS.staleSec))),
+    orderAliveMin: normalizeOrderAliveMin(source),
     cooldownMin: Math.max(0, Math.floor(readFiniteNumber(source.cooldownMin, DEFAULT_EXECUTOR_SETTINGS.cooldownMin))),
     trackCandidateSignalsForResearch: readBoolean(
       source.trackCandidateSignalsForResearch,

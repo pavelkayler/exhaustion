@@ -128,7 +128,7 @@ export type ExecutorSettings = {
   firstOrderOffsetPct: number;
   gridOrdersCount: number;
   gridStepPct: number;
-  staleSec: number;
+  orderAliveMin: number;
   cooldownMin: number;
   trackCandidateSignalsForResearch: boolean;
   takeCandidateSignalsInLiveExecution: boolean;
