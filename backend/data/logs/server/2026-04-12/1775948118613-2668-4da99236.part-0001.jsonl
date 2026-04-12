@@ -1,0 +1,13 @@
+{"level":30,"time":1775948118825,"pid":2668,"bootSessionId":"1775948118613-2668-4da99236","msg":"wsHub: /ws ready (dynamic universe via runtime config)"}
+{"level":30,"time":1775948118828,"pid":2668,"bootSessionId":"1775948118613-2668-4da99236","host":"0.0.0.0","port":8081,"path":"/ws/private-positions","msg":"private positions ws ready"}
+{"level":30,"time":1775948118834,"pid":2668,"bootSessionId":"1775948118613-2668-4da99236","msg":"Server listening at http://127.0.0.1:8080"}
+{"level":30,"time":1775948118835,"pid":2668,"bootSessionId":"1775948118613-2668-4da99236","msg":"Server listening at http://10.35.7.240:8080"}
+{"level":30,"time":1775948118836,"pid":2668,"bootSessionId":"1775948118613-2668-4da99236","msg":"Server listening at http://192.168.1.104:8080"}
+{"level":30,"time":1775948118837,"pid":2668,"bootSessionId":"1775948118613-2668-4da99236","host":"0.0.0.0","port":8080,"bootSessionId":"1775948118613-2668-4da99236","msg":"backend listening"}
+{"level":30,"time":1775948118964,"pid":2668,"bootSessionId":"1775948118613-2668-4da99236","reqId":"req-1","req":{"method":"OPTIONS","url":"/api/session/status","host":"localhost:8080","remoteAddress":"127.0.0.1","remotePort":52142},"msg":"incoming request"}
+{"level":30,"time":1775948118970,"pid":2668,"bootSessionId":"1775948118613-2668-4da99236","reqId":"req-1","res":{"statusCode":204},"responseTime":5.454199999570847,"msg":"request completed"}
+{"level":30,"time":1775948118972,"pid":2668,"bootSessionId":"1775948118613-2668-4da99236","reqId":"req-2","req":{"method":"GET","url":"/api/session/status","host":"localhost:8080","remoteAddress":"127.0.0.1","remotePort":52142},"msg":"incoming request"}
+{"level":30,"time":1775948118974,"pid":2668,"bootSessionId":"1775948118613-2668-4da99236","reqId":"req-2","res":{"statusCode":200},"responseTime":1.8090999983251095,"msg":"request completed"}
+{"level":30,"time":1775948119280,"pid":2668,"bootSessionId":"1775948118613-2668-4da99236","reason":"startup","symbolsCount":100,"changed":true,"universeId":"bybit-linear-usdt-open-interest-top100","topSymbolsPreview":["BTCUSDT","ETHUSDT","SOLUSDT","HYPEUSDT","XRPUSDT","XAUTUSDT","DOGEUSDT","BNBUSDT","TAOUSDT","ZECUSDT"],"msg":"top open interest universe refreshed"}
+{"level":30,"time":1775948121140,"pid":2668,"bootSessionId":"1775948118613-2668-4da99236","reqId":"req-3","req":{"method":"GET","url":"/api/session/status","host":"localhost:8080","remoteAddress":"127.0.0.1","remotePort":52142},"msg":"incoming request"}
+{"level":30,"time":1775948121141,"pid":2668,"bootSessionId":"1775948118613-2668-4da99236","reqId":"req-3","res":{"statusCode":200},"responseTime":0.46130000054836273,"msg":"request completed"}

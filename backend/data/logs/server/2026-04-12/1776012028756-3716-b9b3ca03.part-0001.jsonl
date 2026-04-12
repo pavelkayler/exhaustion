@@ -1,0 +1,12 @@
+{"level":30,"time":1776012029120,"pid":3716,"bootSessionId":"1776012028756-3716-b9b3ca03","msg":"wsHub: /ws ready (dynamic universe via runtime config)"}
+{"level":30,"time":1776012029149,"pid":3716,"bootSessionId":"1776012028756-3716-b9b3ca03","host":"0.0.0.0","port":8081,"path":"/ws/private-positions","msg":"private execution ws ready"}
+{"level":30,"time":1776012029169,"pid":3716,"bootSessionId":"1776012028756-3716-b9b3ca03","msg":"Server listening at http://127.0.0.1:8080"}
+{"level":30,"time":1776012029170,"pid":3716,"bootSessionId":"1776012028756-3716-b9b3ca03","msg":"Server listening at http://10.35.7.240:8080"}
+{"level":30,"time":1776012029171,"pid":3716,"bootSessionId":"1776012028756-3716-b9b3ca03","msg":"Server listening at http://192.168.1.104:8080"}
+{"level":30,"time":1776012029172,"pid":3716,"bootSessionId":"1776012028756-3716-b9b3ca03","host":"0.0.0.0","port":8080,"bootSessionId":"1776012028756-3716-b9b3ca03","msg":"backend listening"}
+{"level":30,"time":1776012029181,"pid":3716,"bootSessionId":"1776012028756-3716-b9b3ca03","topics":500,"shards":4,"totalChars":9989,"maxCharsPerShard":3645,"msg":"bybit ws: starting sharded public streams"}
+{"level":30,"time":1776012029253,"pid":3716,"bootSessionId":"1776012028756-3716-b9b3ca03","reqId":"req-1","req":{"method":"OPTIONS","url":"/api/session/status","host":"localhost:8080","remoteAddress":"127.0.0.1","remotePort":52123},"msg":"incoming request"}
+{"level":30,"time":1776012029259,"pid":3716,"bootSessionId":"1776012028756-3716-b9b3ca03","reqId":"req-1","res":{"statusCode":204},"responseTime":5.0920000076293945,"msg":"request completed"}
+{"level":30,"time":1776012029263,"pid":3716,"bootSessionId":"1776012028756-3716-b9b3ca03","reqId":"req-2","req":{"method":"GET","url":"/api/session/status","host":"localhost:8080","remoteAddress":"127.0.0.1","remotePort":52123},"msg":"incoming request"}
+{"level":30,"time":1776012029265,"pid":3716,"bootSessionId":"1776012028756-3716-b9b3ca03","reqId":"req-2","res":{"statusCode":200},"responseTime":2.026899993419647,"msg":"request completed"}
+{"level":30,"time":1776012029759,"pid":3716,"bootSessionId":"1776012028756-3716-b9b3ca03","reason":"startup","symbolsCount":100,"changed":true,"universeId":"bybit-linear-usdt-open-interest-top100","topSymbolsPreview":["BTCUSDT","ETHUSDT","SOLUSDT","HYPEUSDT","XRPUSDT","XAUTUSDT","DOGEUSDT","BNBUSDT","ZECUSDT","SUIUSDT"],"msg":"top open interest universe refreshed"}

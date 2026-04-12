@@ -1,0 +1,13 @@
+{"level":30,"time":1775947702466,"pid":6584,"bootSessionId":"1775947702250-6584-381cc3e2","msg":"wsHub: /ws ready (dynamic universe via runtime config)"}
+{"level":30,"time":1775947702469,"pid":6584,"bootSessionId":"1775947702250-6584-381cc3e2","msg":"private positions ws ready"}
+{"level":30,"time":1775947702475,"pid":6584,"bootSessionId":"1775947702250-6584-381cc3e2","msg":"Server listening at http://127.0.0.1:8080"}
+{"level":30,"time":1775947702475,"pid":6584,"bootSessionId":"1775947702250-6584-381cc3e2","msg":"Server listening at http://10.35.7.240:8080"}
+{"level":30,"time":1775947702475,"pid":6584,"bootSessionId":"1775947702250-6584-381cc3e2","msg":"Server listening at http://192.168.1.104:8080"}
+{"level":30,"time":1775947702476,"pid":6584,"bootSessionId":"1775947702250-6584-381cc3e2","host":"0.0.0.0","port":8080,"bootSessionId":"1775947702250-6584-381cc3e2","msg":"backend listening"}
+{"level":30,"time":1775947702706,"pid":6584,"bootSessionId":"1775947702250-6584-381cc3e2","reqId":"req-1","req":{"method":"OPTIONS","url":"/api/session/status","host":"localhost:8080","remoteAddress":"127.0.0.1","remotePort":65008},"msg":"incoming request"}
+{"level":30,"time":1775947702711,"pid":6584,"bootSessionId":"1775947702250-6584-381cc3e2","reqId":"req-1","res":{"statusCode":204},"responseTime":3.604600001126528,"msg":"request completed"}
+{"level":30,"time":1775947702712,"pid":6584,"bootSessionId":"1775947702250-6584-381cc3e2","reqId":"req-2","req":{"method":"GET","url":"/api/session/status","host":"localhost:8080","remoteAddress":"127.0.0.1","remotePort":65008},"msg":"incoming request"}
+{"level":30,"time":1775947702714,"pid":6584,"bootSessionId":"1775947702250-6584-381cc3e2","reqId":"req-2","res":{"statusCode":200},"responseTime":1.6378000006079674,"msg":"request completed"}
+{"level":30,"time":1775947702929,"pid":6584,"bootSessionId":"1775947702250-6584-381cc3e2","reason":"startup","symbolsCount":100,"changed":true,"universeId":"bybit-linear-usdt-open-interest-top100","topSymbolsPreview":["BTCUSDT","ETHUSDT","SOLUSDT","HYPEUSDT","XRPUSDT","XAUTUSDT","DOGEUSDT","BNBUSDT","TAOUSDT","ZECUSDT"],"msg":"top open interest universe refreshed"}
+{"level":30,"time":1775947704222,"pid":6584,"bootSessionId":"1775947702250-6584-381cc3e2","reqId":"req-3","req":{"method":"GET","url":"/api/session/status","host":"localhost:8080","remoteAddress":"127.0.0.1","remotePort":65008},"msg":"incoming request"}
+{"level":30,"time":1775947704223,"pid":6584,"bootSessionId":"1775947702250-6584-381cc3e2","reqId":"req-3","res":{"statusCode":200},"responseTime":0.6513999998569489,"msg":"request completed"}
