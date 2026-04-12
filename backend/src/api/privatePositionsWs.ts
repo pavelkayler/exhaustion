@@ -329,10 +329,30 @@ function normalizeOrderRow(
 
   const value =
     readPositiveNumber(row.orderValue)
+    ?? readPositiveNumber(row.leavesValue)
     ?? ((entryPrice != null && qty != null) ? entryPrice * qty : null);
 
-  const leverage = readPositiveNumber(row.leverage) ?? leverageFallbackBySymbol.get(symbol) ?? null;
-  const margin = value != null && leverage != null && leverage > 0 ? value / leverage : null;
+  const directMargin =
+    readPositiveNumber(row.orderMargin)
+    ?? readPositiveNumber(row.orderIM)
+    ?? readPositiveNumber(row.positionIM)
+    ?? readPositiveNumber(row.positionBalance)
+    ?? readPositiveNumber(row.requiredMargin)
+    ?? readPositiveNumber(row.initialMargin);
+
+  const leverageFromMargin =
+    value != null && directMargin != null && directMargin > 0
+      ? value / directMargin
+      : null;
+
+  const leverage =
+    readPositiveNumber(row.leverage)
+    ?? leverageFallbackBySymbol.get(symbol)
+    ?? leverageFromMargin;
+
+  const margin =
+    directMargin
+    ?? (value != null && leverage != null && leverage > 0 ? value / leverage : null);
 
   return {
     key,
@@ -461,6 +481,7 @@ class BybitPrivateExecutionStream {
   private readonly restPositions = new Map<string, StoredPositionRow>();
   private readonly wsPositions = new Map<string, StoredPositionRow>();
   private readonly positionDeletes = new Map<string, number>();
+  private readonly restSymbolLeverage = new Map<string, number | null>();
 
   private readonly restOrders = new Map<string, StoredOrderRow>();
   private readonly wsOrders = new Map<string, StoredOrderRow>();
@@ -673,6 +694,9 @@ class BybitPrivateExecutionStream {
 
   private buildLeverageFallbackBySymbol(): Map<string, number | null> {
     const fallback = new Map<string, number | null>();
+    for (const [symbol, leverage] of this.restSymbolLeverage.entries()) {
+      fallback.set(symbol, leverage);
+    }
     for (const position of this.getMergedPositions()) {
       fallback.set(position.symbol, position.leverage);
     }
@@ -693,9 +717,16 @@ class BybitPrivateExecutionStream {
       });
 
       const nextPositions = new Map<string, StoredPositionRow>();
+      const nextSymbolLeverage = new Map<string, number | null>();
       const seenPositionKeys = new Set<string>();
       for (const item of Array.isArray(positionsResponse?.list) ? positionsResponse.list : []) {
         if (!item || typeof item !== "object") continue;
+        const symbol = String(item.symbol ?? "").trim().toUpperCase();
+        const leverage = readPositiveNumber(item.leverage);
+        if (symbol && leverage != null) {
+          nextSymbolLeverage.set(symbol, leverage);
+        }
+
         const key = toPositionKey(item);
         seenPositionKeys.add(key);
         const normalized = normalizePositionRow(
@@ -705,6 +736,11 @@ class BybitPrivateExecutionStream {
         );
         if (!normalized) continue;
         nextPositions.set(normalized.key, normalized);
+      }
+
+      this.restSymbolLeverage.clear();
+      for (const [symbol, leverage] of nextSymbolLeverage.entries()) {
+        this.restSymbolLeverage.set(symbol, leverage);
       }
 
       for (const staleKey of this.restPositions.keys()) {
