@@ -1063,6 +1063,19 @@ class PrivateExecutionExecutorManager {
     return this.activeSettings;
   }
 
+  private handleExecutorError(reason: string, error: unknown): void {
+    this.status = "error";
+    this.error = String((error as Error)?.message ?? error);
+    executorStore.setError(this.error);
+    this.logger.error(
+      {
+        reason,
+        error: this.error,
+      },
+      "private execution executor reconcile failed",
+    );
+  }
+
   private async activate(reason: string): Promise<void> {
     if (this.disposed || !executorStore.getState().running) return;
     if (!isRuntimeSessionActive()) {
@@ -1070,25 +1083,50 @@ class PrivateExecutionExecutorManager {
       return;
     }
 
-    const settings = this.ensureActiveSettings();
-    const stream = this.getActiveStream(settings.mode);
-    this.status = "starting";
-    stream.ensureStarted();
-    await stream.forceRefresh(`executor_${reason}_startup_refresh`);
-    await this.scheduleReconcile(`executor_${reason}`);
-    if (executorStore.getState().running && isRuntimeSessionActive() && this.error == null) {
-      this.status = "running";
+    try {
+      const settings = this.ensureActiveSettings();
+      const stream = this.getActiveStream(settings.mode);
+      this.status = "starting";
+      stream.ensureStarted();
+      await stream.forceRefresh(`executor_${reason}_startup_refresh`);
+      await this.scheduleReconcile(`executor_${reason}`);
+      if (executorStore.getState().running && isRuntimeSessionActive() && this.error == null) {
+        this.status = "running";
+      }
+    } catch (error) {
+      this.handleExecutorError(`activate:${reason}`, error);
+      throw error;
     }
   }
 
-  private shouldSkipDuplicate(positionKey: string, fingerprint: string): boolean {
+  private isDuplicateFingerprint(positionKey: string, fingerprint: string): boolean {
     const current = this.recentFingerprints.get(positionKey);
     const now = Date.now();
-    if (current && current.fingerprint === fingerprint && now - current.at <= EXECUTOR_ACTION_DEDUPE_MS) {
-      return true;
-    }
-    this.recentFingerprints.set(positionKey, { fingerprint, at: now });
-    return false;
+    return Boolean(
+      current &&
+      current.fingerprint === fingerprint &&
+      now - current.at <= EXECUTOR_ACTION_DEDUPE_MS,
+    );
+  }
+
+  private rememberFingerprint(positionKey: string, fingerprint: string): void {
+    this.recentFingerprints.set(positionKey, {
+      fingerprint,
+      at: Date.now(),
+    });
+  }
+
+  private async applyTradingStopPatch(args: {
+    restClient: ExecutionRestClient;
+    symbol: string;
+    positionIdx: number;
+    patch: Record<string, unknown>;
+  }): Promise<void> {
+    await args.restClient.setTradingStopLinear({
+      symbol: args.symbol,
+      positionIdx: args.positionIdx,
+      ...args.patch,
+    });
   }
 
   private async scheduleReconcile(reason: string): Promise<void> {
@@ -1107,7 +1145,12 @@ class PrivateExecutionExecutorManager {
       let nextReason: string | null = reason;
       while (nextReason) {
         this.queuedReason = null;
-        await this.reconcile(nextReason);
+        try {
+          await this.reconcile(nextReason);
+        } catch (error) {
+          this.handleExecutorError(`reconcile:${nextReason}`, error);
+          return;
+        }
         nextReason = this.queuedReason;
       }
     } finally {
@@ -1238,30 +1281,63 @@ class PrivateExecutionExecutorManager {
 
     const fingerprint = `full:${args.position.key}:${targetTp}:${targetSl}`;
     const hasConflicts = args.exitOrders.length > 0;
-    const needsTradingStopUpdate =
-      !sameWithinStep(args.position.tp, targetTp, args.tickSize) ||
-      !sameWithinStep(args.position.sl, targetSl, args.tickSize) ||
-      (args.position.trailingStop ?? null) != null;
+    const needsTpUpdate = !sameWithinStep(args.position.tp, targetTp, args.tickSize);
+    const needsSlUpdate = !sameWithinStep(args.position.sl, targetSl, args.tickSize);
+    const needsTrailingClear = (args.position.trailingStop ?? null) != null;
 
-    if (!hasConflicts && !needsTradingStopUpdate) {
+    if (!hasConflicts && !needsTpUpdate && !needsSlUpdate && !needsTrailingClear) {
       return 0;
     }
-    if (this.shouldSkipDuplicate(args.position.key, fingerprint)) {
+    if (this.isDuplicateFingerprint(args.position.key, fingerprint)) {
       return 0;
     }
 
     let actions = 0;
     actions += await this.cancelOrders(args.restClient, args.position.symbol, args.exitOrders);
-    await args.restClient.setTradingStopLinear({
-      symbol: args.position.symbol,
-      positionIdx: args.positionIdx,
-      tpslMode: "Full",
-      takeProfit: formatForApi(targetTp),
-      stopLoss: formatForApi(targetSl),
-      trailingStop: "0",
-      activePrice: "0",
-    });
-    actions += 1;
+
+    if (needsTrailingClear) {
+      await this.applyTradingStopPatch({
+        restClient: args.restClient,
+        symbol: args.position.symbol,
+        positionIdx: args.positionIdx,
+        patch: {
+          trailingStop: "0",
+        },
+      });
+      actions += 1;
+    }
+
+    if (needsTpUpdate) {
+      await this.applyTradingStopPatch({
+        restClient: args.restClient,
+        symbol: args.position.symbol,
+        positionIdx: args.positionIdx,
+        patch: {
+          tpslMode: "Full",
+          takeProfit: formatForApi(targetTp),
+          tpTriggerBy: "LastPrice",
+        },
+      });
+      actions += 1;
+    }
+
+    if (needsSlUpdate) {
+      await this.applyTradingStopPatch({
+        restClient: args.restClient,
+        symbol: args.position.symbol,
+        positionIdx: args.positionIdx,
+        patch: {
+          tpslMode: "Full",
+          stopLoss: formatForApi(targetSl),
+          slTriggerBy: "LastPrice",
+        },
+      });
+      actions += 1;
+    }
+
+    if (actions > 0) {
+      this.rememberFingerprint(args.position.key, fingerprint);
+    }
     return actions;
   }
 
@@ -1276,30 +1352,64 @@ class PrivateExecutionExecutorManager {
     fingerprint: string;
   }): Promise<number> {
     const targetDistance = computeTrailingDistance(args.anchorPrice, args.distancePct, args.tickSize);
+    const fingerprint = `${args.fingerprint}:${targetDistance}`;
     const hasConflicts = args.exitOrders.length > 0;
-    const needsTradingStopUpdate =
-      (args.position.tp ?? null) != null ||
-      (args.position.sl ?? null) != null ||
-      !sameWithinStep(args.position.trailingStop, targetDistance, args.tickSize);
+    const needsTpClear = (args.position.tp ?? null) != null;
+    const needsSlClear = (args.position.sl ?? null) != null;
+    const needsTrailingUpdate = !sameWithinStep(args.position.trailingStop, targetDistance, args.tickSize);
 
-    if (!hasConflicts && !needsTradingStopUpdate) {
+    if (!hasConflicts && !needsTpClear && !needsSlClear && !needsTrailingUpdate) {
       return 0;
     }
-    if (this.shouldSkipDuplicate(args.position.key, `${args.fingerprint}:${targetDistance}`)) {
+    if (this.isDuplicateFingerprint(args.position.key, fingerprint)) {
       return 0;
     }
 
     let actions = 0;
     actions += await this.cancelOrders(args.restClient, args.position.symbol, args.exitOrders);
-    await args.restClient.setTradingStopLinear({
-      symbol: args.position.symbol,
-      positionIdx: args.positionIdx,
-      tpslMode: "Full",
-      takeProfit: "0",
-      stopLoss: "0",
-      trailingStop: formatForApi(targetDistance),
-    });
-    actions += 1;
+
+    if (needsTpClear) {
+      await this.applyTradingStopPatch({
+        restClient: args.restClient,
+        symbol: args.position.symbol,
+        positionIdx: args.positionIdx,
+        patch: {
+          tpslMode: "Full",
+          takeProfit: "0",
+        },
+      });
+      actions += 1;
+    }
+
+    if (needsSlClear) {
+      await this.applyTradingStopPatch({
+        restClient: args.restClient,
+        symbol: args.position.symbol,
+        positionIdx: args.positionIdx,
+        patch: {
+          tpslMode: "Full",
+          stopLoss: "0",
+        },
+      });
+      actions += 1;
+    }
+
+    if (needsTrailingUpdate) {
+      await this.applyTradingStopPatch({
+        restClient: args.restClient,
+        symbol: args.position.symbol,
+        positionIdx: args.positionIdx,
+        patch: {
+          tpslMode: "Full",
+          trailingStop: formatForApi(targetDistance),
+        },
+      });
+      actions += 1;
+    }
+
+    if (actions > 0) {
+      this.rememberFingerprint(args.position.key, fingerprint);
+    }
     return actions;
   }
 
@@ -1405,29 +1515,54 @@ class PrivateExecutionExecutorManager {
     }) ?? null;
 
     const conflictingOrders = args.exitOrders.filter((order) => order !== managedOrder);
-    const needsStopLossUpdate =
-      (args.position.tp ?? null) != null ||
-      !sameWithinStep(args.position.sl, targetSl, args.tickSize) ||
-      (args.position.trailingStop ?? null) != null;
+    const needsTakeProfitClear = (args.position.tp ?? null) != null;
+    const needsTrailingClear = (args.position.trailingStop ?? null) != null;
+    const needsStopLossUpdate = !sameWithinStep(args.position.sl, targetSl, args.tickSize);
 
-    if (!managedOrder || conflictingOrders.length > 0 || needsStopLossUpdate) {
+    if (!managedOrder || conflictingOrders.length > 0 || needsTakeProfitClear || needsTrailingClear || needsStopLossUpdate) {
       const fingerprint = `partial_pending:${args.position.key}:${targetTp}:${targetSl}:${targetQty}`;
-      if (this.shouldSkipDuplicate(args.position.key, fingerprint)) {
+      if (this.isDuplicateFingerprint(args.position.key, fingerprint)) {
         return 0;
       }
 
       let actions = 0;
       actions += await this.cancelOrders(args.restClient, args.position.symbol, conflictingOrders);
 
-      if (needsStopLossUpdate) {
-        await args.restClient.setTradingStopLinear({
+      if (needsTakeProfitClear) {
+        await this.applyTradingStopPatch({
+          restClient: args.restClient,
           symbol: args.position.symbol,
           positionIdx: args.positionIdx,
-          tpslMode: "Full",
-          takeProfit: "0",
-          stopLoss: formatForApi(targetSl),
-          trailingStop: "0",
-          activePrice: "0",
+          patch: {
+            tpslMode: "Full",
+            takeProfit: "0",
+          },
+        });
+        actions += 1;
+      }
+
+      if (needsTrailingClear) {
+        await this.applyTradingStopPatch({
+          restClient: args.restClient,
+          symbol: args.position.symbol,
+          positionIdx: args.positionIdx,
+          patch: {
+            trailingStop: "0",
+          },
+        });
+        actions += 1;
+      }
+
+      if (needsStopLossUpdate) {
+        await this.applyTradingStopPatch({
+          restClient: args.restClient,
+          symbol: args.position.symbol,
+          positionIdx: args.positionIdx,
+          patch: {
+            tpslMode: "Full",
+            stopLoss: formatForApi(targetSl),
+            slTriggerBy: "LastPrice",
+          },
         });
         actions += 1;
       }
@@ -1447,6 +1582,9 @@ class PrivateExecutionExecutorManager {
         actions += 1;
       }
 
+      if (actions > 0) {
+        this.rememberFingerprint(args.position.key, fingerprint);
+      }
       return actions;
     }
 
