@@ -57,7 +57,7 @@ type ServerMessage =
   | { type: "execution_snapshot"; payload: PositionsSnapshot }
   | { type: "error"; message: string };
 
-type OrdersSeedClient = {
+type ExecutionRestClient = {
   hasCredentials(): boolean;
   getOpenOrdersLinear(params?: {
     symbol?: string;
@@ -65,20 +65,25 @@ type OrdersSeedClient = {
     limit?: number;
     cursor?: string;
   }): Promise<{ list: Array<Record<string, unknown>> }>;
+  getPositionsLinear(params?: {
+    symbol?: string;
+    settleCoin?: string;
+  }): Promise<{ list: Array<Record<string, unknown>> }>;
 };
 
 type StoredPositionRow = ExecutionPositionRow & {
   leverage: number | null;
+  updatedAt: number;
+};
+
+type StoredOrderRow = ExecutionOrderRow & {
+  updatedAt: number;
 };
 
 const POSITIONS_WS_PATH = "/ws/private-positions";
 const PRIVATE_WS_PING_INTERVAL_MS = 20_000;
 const CLIENT_BROADCAST_INTERVAL_MS = 1_000;
-const POSITION_RESUBSCRIBE_INTERVAL_MS = 60_000;
-const POSITION_RESUBSCRIBE_TIMEOUT_MS = 8_000;
-const POSITION_REFRESH_GUARD_INTERVAL_MS = 1_000;
-const POSITION_BOOTSTRAP_RETRY_INTERVAL_MS = 10_000;
-const POSITION_BOOTSTRAP_RETRY_MAX_MS = 60_000;
+const REST_REFRESH_INTERVAL_MS = 60_000;
 
 function normalizeMode(value: unknown): ExecutionMode {
   return String(value ?? "").trim().toLowerCase() === "real" ? "real" : "demo";
@@ -132,6 +137,18 @@ function toOrderKey(row: Record<string, unknown>): string {
   return `${symbol}:${String(row.createdTime ?? row.updatedTime ?? Date.now())}`;
 }
 
+function readRowUpdatedAt(row: Record<string, unknown>, fallbackTs: number): number {
+  return (
+    readPositiveNumber(row.updatedTime) ??
+    readPositiveNumber(row.updatedAt) ??
+    readPositiveNumber(row.ts) ??
+    readPositiveNumber(row.transactTime) ??
+    readPositiveNumber(row.createdTime) ??
+    readPositiveNumber(row.createdAt) ??
+    fallbackTs
+  );
+}
+
 function normalizePositionRow(
   row: Record<string, unknown>,
   receivedAt: number,
@@ -145,6 +162,8 @@ function normalizePositionRow(
     return null;
   }
 
+  const updatedAt = readRowUpdatedAt(row, receivedAt);
+
   return {
     key,
     symbol,
@@ -157,7 +176,7 @@ function normalizePositionRow(
     size,
     entryPrice: readPositiveNumber(row.avgPrice),
     markPrice: readPositiveNumber(row.markPrice),
-    updatedAt: receivedAt,
+    updatedAt,
     leverage: readPositiveNumber(row.leverage),
   };
 }
@@ -184,7 +203,7 @@ function normalizeOrderRow(
   row: Record<string, unknown>,
   leverageFallbackBySymbol: Map<string, number | null>,
   receivedAt: number,
-): ExecutionOrderRow | null {
+): StoredOrderRow | null {
   if (!isActiveOrderStatus(row.orderStatus)) return null;
   if (!isLimitOrderType(row.orderType)) return null;
 
@@ -231,7 +250,7 @@ function normalizeOrderRow(
       readNumber(row.createdAt) ??
       readNumber(row.placeTime) ??
       readNumber(row.updatedTime),
-    updatedAt: receivedAt,
+    updatedAt: readRowUpdatedAt(row, receivedAt),
   };
 }
 
@@ -261,24 +280,22 @@ class BybitPrivateExecutionStream {
   private privateWs: WebSocket | null = null;
   private privateReconnectTimer: NodeJS.Timeout | null = null;
   private privatePingTimer: NodeJS.Timeout | null = null;
-  private refreshGuardTimer: NodeJS.Timeout | null = null;
-  private positionRefreshTimeoutTimer: NodeJS.Timeout | null = null;
+  private restRefreshTimer: NodeJS.Timeout | null = null;
   private privateReconnectAttempt = 0;
   private initialPrivateSubscribeDone = false;
-  private bootstrapPositionResolved = false;
 
   private shouldRun = false;
   private status: FeedStatus;
   private updatedAt: number | null = null;
   private error: string | null = null;
-  private positions = new Map<string, StoredPositionRow>();
-  private orders = new Map<string, ExecutionOrderRow>();
 
-  private lastPositionFrameAt: number | null = null;
-  private positionRefreshCycleStartedAt: number | null = null;
-  private positionRefreshAttemptStartedAt: number | null = null;
-  private positionRefreshFailureCount = 0;
-  private positionResubscribeInFlight = false;
+  private readonly restPositions = new Map<string, StoredPositionRow>();
+  private readonly wsPositions = new Map<string, StoredPositionRow>();
+  private readonly positionDeletes = new Map<string, number>();
+
+  private readonly restOrders = new Map<string, StoredOrderRow>();
+  private readonly wsOrders = new Map<string, StoredOrderRow>();
+  private readonly orderDeletes = new Map<string, number>();
 
   constructor(
     private readonly mode: ExecutionMode,
@@ -286,7 +303,7 @@ class BybitPrivateExecutionStream {
     private readonly privateWsUrl: string,
     private readonly apiKey: string,
     private readonly apiSecret: string,
-    private readonly ordersSeedClient: OrdersSeedClient | null,
+    private readonly restClient: ExecutionRestClient | null,
   ) {
     this.status = this.hasCredentials() ? "connecting" : "missing_credentials";
   }
@@ -296,17 +313,32 @@ class BybitPrivateExecutionStream {
   }
 
   getSnapshot(): PositionsSnapshot {
-    const positions = Array.from(this.positions.values()).sort((left, right) => {
-      const symbolCmp = left.symbol.localeCompare(right.symbol);
-      if (symbolCmp !== 0) return symbolCmp;
-      return left.key.localeCompare(right.key);
-    });
+    const positions = this.getMergedPositions().map((row) => ({
+      key: row.key,
+      symbol: row.symbol,
+      reason: row.reason,
+      value: row.value,
+      pnl: row.pnl,
+      tp: row.tp,
+      sl: row.sl,
+      side: row.side,
+      size: row.size,
+      entryPrice: row.entryPrice,
+      markPrice: row.markPrice,
+      updatedAt: row.updatedAt,
+    }));
 
-    const orders = Array.from(this.orders.values()).sort((left, right) => {
-      const symbolCmp = left.symbol.localeCompare(right.symbol);
-      if (symbolCmp !== 0) return symbolCmp;
-      return (left.placedAt ?? 0) - (right.placedAt ?? 0);
-    });
+    const orders = this.getMergedOrders().map((row) => ({
+      key: row.key,
+      symbol: row.symbol,
+      reason: row.reason,
+      value: row.value,
+      margin: row.margin,
+      leverage: row.leverage,
+      entryPrice: row.entryPrice,
+      placedAt: row.placedAt,
+      updatedAt: row.updatedAt,
+    }));
 
     return {
       mode: this.mode,
@@ -326,8 +358,8 @@ class BybitPrivateExecutionStream {
     }
     if (this.shouldRun) return;
     this.shouldRun = true;
-    this.startRefreshGuard();
-    void this.seedOrdersFromRest("ensure_started");
+    this.startRestRefreshLoop();
+    void this.refreshFromRest("startup");
     this.connectPrivate();
   }
 
@@ -336,18 +368,11 @@ class BybitPrivateExecutionStream {
 
     if (this.privateReconnectTimer) clearTimeout(this.privateReconnectTimer);
     if (this.privatePingTimer) clearInterval(this.privatePingTimer);
-    if (this.refreshGuardTimer) clearInterval(this.refreshGuardTimer);
-    if (this.positionRefreshTimeoutTimer) clearTimeout(this.positionRefreshTimeoutTimer);
+    if (this.restRefreshTimer) clearInterval(this.restRefreshTimer);
 
     this.privateReconnectTimer = null;
     this.privatePingTimer = null;
-    this.refreshGuardTimer = null;
-    this.positionRefreshTimeoutTimer = null;
-
-    this.positionRefreshAttemptStartedAt = null;
-    this.positionRefreshFailureCount = 0;
-    this.positionResubscribeInFlight = false;
-    this.bootstrapPositionResolved = false;
+    this.restRefreshTimer = null;
 
     try {
       this.privateWs?.close();
@@ -356,96 +381,146 @@ class BybitPrivateExecutionStream {
     this.privateWs = null;
   }
 
-  private startRefreshGuard(): void {
-    if (this.refreshGuardTimer) clearInterval(this.refreshGuardTimer);
-    this.refreshGuardTimer = setInterval(() => {
-      this.tickPositionRefreshGuard();
-    }, POSITION_REFRESH_GUARD_INTERVAL_MS);
+  private startRestRefreshLoop(): void {
+    if (this.restRefreshTimer) clearInterval(this.restRefreshTimer);
+    this.restRefreshTimer = setInterval(() => {
+      void this.refreshFromRest("interval");
+    }, REST_REFRESH_INTERVAL_MS);
   }
 
-  private tickPositionRefreshGuard(): void {
-    if (!this.shouldRun) return;
-    if (!this.privateWs || this.privateWs.readyState !== WebSocket.OPEN) return;
-    if (this.status !== "connected") return;
-    if (this.positionResubscribeInFlight) return;
+  private buildVisiblePositionMap(): Map<string, StoredPositionRow> {
+    const visible = new Map<string, StoredPositionRow>();
+    const keys = new Set<string>([
+      ...this.restPositions.keys(),
+      ...this.wsPositions.keys(),
+      ...this.positionDeletes.keys(),
+    ]);
 
-    const now = Date.now();
-    const baseAt = this.lastPositionFrameAt ?? this.positionRefreshCycleStartedAt;
-    if (!(Number(baseAt) > 0)) return;
+    for (const key of keys) {
+      const restRow = this.restPositions.get(key) ?? null;
+      const wsRow = this.wsPositions.get(key) ?? null;
+      const deleteTs = this.positionDeletes.get(key) ?? null;
 
-    if (!this.bootstrapPositionResolved) {
-      const bootstrapElapsedMs = now - Number(this.positionRefreshCycleStartedAt ?? baseAt);
+      const restAllowed = restRow != null && (deleteTs == null || restRow.updatedAt > deleteTs);
+      const wsAllowed = wsRow != null && (deleteTs == null || wsRow.updatedAt > deleteTs);
 
-      if (this.lastPositionFrameAt != null) {
-        this.bootstrapPositionResolved = true;
-      } else if (bootstrapElapsedMs >= POSITION_BOOTSTRAP_RETRY_MAX_MS) {
-        this.bootstrapPositionResolved = true;
-      } else if (bootstrapElapsedMs >= POSITION_BOOTSTRAP_RETRY_INTERVAL_MS) {
-        this.requestPositionResubscribe(
-          `position_bootstrap_${Math.floor(bootstrapElapsedMs / POSITION_BOOTSTRAP_RETRY_INTERVAL_MS)}`,
-        );
-        return;
+      if (wsAllowed && (!restAllowed || wsRow!.updatedAt >= restRow!.updatedAt)) {
+        visible.set(key, wsRow!);
+        continue;
+      }
+
+      if (restAllowed) {
+        visible.set(key, restRow!);
       }
     }
 
-    const elapsedMs = now - Number(baseAt);
-    if (elapsedMs < POSITION_RESUBSCRIBE_INTERVAL_MS) return;
-
-    const minutesSinceBase = Math.floor(elapsedMs / POSITION_RESUBSCRIBE_INTERVAL_MS);
-
-    if (minutesSinceBase >= 5 && this.positionRefreshFailureCount >= 4) {
-      this.logger.warn(
-        {
-          mode: this.mode,
-          minutesSinceBase,
-          failures: this.positionRefreshFailureCount,
-        },
-        "position refresh escalation: full private ws reconnect",
-      );
-      this.forcePrivateReconnect("position_refresh_5m_escalation");
-      return;
-    }
-
-    if (minutesSinceBase >= this.positionRefreshFailureCount + 1) {
-      this.requestPositionResubscribe(`position_refresh_m${minutesSinceBase}`);
-    }
+    return visible;
   }
 
-  private async seedOrdersFromRest(reason: string): Promise<void> {
+  private getMergedPositions(): StoredPositionRow[] {
+    return Array.from(this.buildVisiblePositionMap().values()).sort((left, right) => {
+      const symbolCmp = left.symbol.localeCompare(right.symbol);
+      if (symbolCmp !== 0) return symbolCmp;
+      return left.key.localeCompare(right.key);
+    });
+  }
+
+  private getMergedOrders(): StoredOrderRow[] {
+    const visible = new Map<string, StoredOrderRow>();
+    const keys = new Set<string>([
+      ...this.restOrders.keys(),
+      ...this.wsOrders.keys(),
+      ...this.orderDeletes.keys(),
+    ]);
+
+    for (const key of keys) {
+      const restRow = this.restOrders.get(key) ?? null;
+      const wsRow = this.wsOrders.get(key) ?? null;
+      const deleteTs = this.orderDeletes.get(key) ?? null;
+
+      const restAllowed = restRow != null && (deleteTs == null || restRow.updatedAt > deleteTs);
+      const wsAllowed = wsRow != null && (deleteTs == null || wsRow.updatedAt > deleteTs);
+
+      if (wsAllowed && (!restAllowed || wsRow!.updatedAt >= restRow!.updatedAt)) {
+        visible.set(key, wsRow!);
+        continue;
+      }
+
+      if (restAllowed) {
+        visible.set(key, restRow!);
+      }
+    }
+
+    return Array.from(visible.values()).sort((left, right) => {
+      const symbolCmp = left.symbol.localeCompare(right.symbol);
+      if (symbolCmp !== 0) return symbolCmp;
+      return (left.placedAt ?? 0) - (right.placedAt ?? 0);
+    });
+  }
+
+  private buildLeverageFallbackBySymbol(): Map<string, number | null> {
+    const fallback = new Map<string, number | null>();
+    for (const position of this.getMergedPositions()) {
+      fallback.set(position.symbol, position.leverage);
+    }
+    return fallback;
+  }
+
+  private async refreshFromRest(reason: string): Promise<void> {
     if (!this.shouldRun) return;
-    if (!this.ordersSeedClient || !this.ordersSeedClient.hasCredentials()) return;
+    if (!this.restClient || !this.restClient.hasCredentials()) return;
 
     try {
-      const response = await this.ordersSeedClient.getOpenOrdersLinear({
+      const refreshedAt = Date.now();
+
+      const positionsResponse = await this.restClient.getPositionsLinear({
+        settleCoin: "USDT",
+      });
+
+      const nextRestPositions = new Map<string, StoredPositionRow>();
+      for (const item of Array.isArray(positionsResponse?.list) ? positionsResponse.list : []) {
+        if (!item || typeof item !== "object") continue;
+        const normalized = normalizePositionRow(item, refreshedAt);
+        if (!normalized) continue;
+        nextRestPositions.set(normalized.key, normalized);
+      }
+      this.restPositions.clear();
+      for (const [key, value] of nextRestPositions.entries()) {
+        this.restPositions.set(key, value);
+      }
+
+      const leverageFallbackBySymbol = this.buildLeverageFallbackBySymbol();
+
+      const ordersResponse = await this.restClient.getOpenOrdersLinear({
         settleCoin: "USDT",
         limit: 50,
       });
 
-      const leverageFallbackBySymbol = new Map<string, number | null>();
-      for (const position of this.positions.values()) {
-        leverageFallbackBySymbol.set(position.symbol, position.leverage);
-      }
-
-      const receivedAt = Date.now();
-      const nextOrders = new Map<string, ExecutionOrderRow>();
-      for (const item of Array.isArray(response?.list) ? response.list : []) {
+      const nextRestOrders = new Map<string, StoredOrderRow>();
+      for (const item of Array.isArray(ordersResponse?.list) ? ordersResponse.list : []) {
         if (!item || typeof item !== "object") continue;
-        const normalized = normalizeOrderRow(item, leverageFallbackBySymbol, receivedAt);
+        const normalized = normalizeOrderRow(item, leverageFallbackBySymbol, refreshedAt);
         if (!normalized) continue;
-        nextOrders.set(normalized.key, normalized);
+        nextRestOrders.set(normalized.key, normalized);
+      }
+      this.restOrders.clear();
+      for (const [key, value] of nextRestOrders.entries()) {
+        this.restOrders.set(key, value);
       }
 
-      this.orders = nextOrders;
-      this.updatedAt = receivedAt;
-      this.error = null;
+      this.updatedAt = refreshedAt;
+      if (this.status !== "missing_credentials") {
+        this.error = null;
+      }
 
       this.logger.info(
         {
           mode: this.mode,
           reason,
-          orders: nextOrders.size,
+          positions: nextRestPositions.size,
+          orders: nextRestOrders.size,
         },
-        "private execution orders seeded",
+        "private execution state refreshed from rest",
       );
     } catch (error) {
       this.logger.warn(
@@ -454,164 +529,76 @@ class BybitPrivateExecutionStream {
           reason,
           error: String((error as Error)?.message ?? error),
         },
-        "private execution orders seed failed",
+        "private execution rest refresh failed",
       );
     }
   }
 
-  private requestPositionResubscribe(reason: string): void {
-    if (!this.privateWs || this.privateWs.readyState !== WebSocket.OPEN) return;
-    if (this.positionResubscribeInFlight) return;
-
-    this.positionResubscribeInFlight = true;
-    this.positionRefreshAttemptStartedAt = Date.now();
-
-    if (this.positionRefreshTimeoutTimer) clearTimeout(this.positionRefreshTimeoutTimer);
-    this.positionRefreshTimeoutTimer = setTimeout(() => {
-      this.positionRefreshTimeoutTimer = null;
-      this.markPositionRefreshFailure(`${reason}:timeout`);
-    }, POSITION_RESUBSCRIBE_TIMEOUT_MS);
-
-    this.logger.info(
-      {
-        mode: this.mode,
-        reason,
-        failures: this.positionRefreshFailureCount,
-      },
-      "position refresh resubscribe requested",
-    );
-
-    try {
-      this.privateWs.send(JSON.stringify({ op: "unsubscribe", args: ["position"] }));
-    } catch {}
-
-    setTimeout(() => {
-      if (!this.privateWs || this.privateWs.readyState !== WebSocket.OPEN) return;
-      try {
-        this.privateWs.send(JSON.stringify({ op: "subscribe", args: ["position"] }));
-      } catch {}
-    }, 150);
+  private markPositionDeleted(key: string, deletedAt: number): void {
+    this.wsPositions.delete(key);
+    this.positionDeletes.set(key, deletedAt);
   }
 
-  private markPositionRefreshSuccess(receivedAt: number): void {
-    this.lastPositionFrameAt = receivedAt;
-    this.positionRefreshCycleStartedAt = receivedAt;
-    this.positionRefreshFailureCount = 0;
-    this.positionResubscribeInFlight = false;
-    this.bootstrapPositionResolved = true;
-    if (this.positionRefreshTimeoutTimer) clearTimeout(this.positionRefreshTimeoutTimer);
-    this.positionRefreshTimeoutTimer = null;
-    this.positionRefreshAttemptStartedAt = null;
-  }
-
-  private markPositionRefreshFailure(reason: string): void {
-    if (!this.positionResubscribeInFlight) return;
-
-    this.positionResubscribeInFlight = false;
-    this.positionRefreshAttemptStartedAt = null;
-    if (this.positionRefreshTimeoutTimer) clearTimeout(this.positionRefreshTimeoutTimer);
-    this.positionRefreshTimeoutTimer = null;
-    this.positionRefreshFailureCount += 1;
-
-    this.logger.warn(
-      {
-        mode: this.mode,
-        reason,
-        failures: this.positionRefreshFailureCount,
-        lastPositionFrameAt: this.lastPositionFrameAt,
-      },
-      "position refresh resubscribe failed",
-    );
-  }
-
-  private forcePrivateReconnect(reason: string): void {
-    this.positionResubscribeInFlight = false;
-    this.positionRefreshAttemptStartedAt = null;
-    if (this.positionRefreshTimeoutTimer) clearTimeout(this.positionRefreshTimeoutTimer);
-    this.positionRefreshTimeoutTimer = null;
-
-    const socket = this.privateWs;
-    this.privateWs = null;
-    this.initialPrivateSubscribeDone = false;
-    this.bootstrapPositionResolved = false;
-    this.status = "reconnecting";
-
-    try {
-      socket?.close();
-    } catch {}
-
-    if (this.privateReconnectTimer) clearTimeout(this.privateReconnectTimer);
-    this.privateReconnectTimer = setTimeout(() => {
-      this.privateReconnectTimer = null;
-      if (!this.shouldRun) return;
-      this.connectPrivate();
-    }, 250);
-
-    this.logger.warn({ mode: this.mode, reason }, "forcing private ws reconnect");
+  private markOrderDeleted(key: string, deletedAt: number): void {
+    this.wsOrders.delete(key);
+    this.orderDeletes.set(key, deletedAt);
   }
 
   private handlePositionFrame(data: unknown): void {
     const receivedAt = Date.now();
-    const items = parseMessageItems(data);
-    let mutated = false;
 
     if (Array.isArray(data) && data.length === 0) {
-      if (this.positions.size > 0) {
-        this.positions.clear();
-        mutated = true;
+      const visibleKeys = new Set<string>([
+        ...this.restPositions.keys(),
+        ...this.wsPositions.keys(),
+      ]);
+      for (const key of visibleKeys) {
+        this.markPositionDeleted(key, receivedAt);
       }
-    } else {
-      for (const item of items) {
-        const normalized = normalizePositionRow(item, receivedAt);
-        const key = toPositionKey(item);
-
-        if (!normalized) {
-          if (this.positions.delete(key)) mutated = true;
-          continue;
-        }
-
-        this.positions.set(key, normalized);
-        mutated = true;
-      }
+      this.updatedAt = receivedAt;
+      this.status = "connected";
+      this.error = null;
+      return;
     }
 
-    this.markPositionRefreshSuccess(receivedAt);
+    for (const item of parseMessageItems(data)) {
+      const normalized = normalizePositionRow(item, receivedAt);
+      const key = toPositionKey(item);
+
+      if (!normalized) {
+        this.markPositionDeleted(key, receivedAt);
+        continue;
+      }
+
+      this.positionDeletes.delete(key);
+      this.wsPositions.set(key, normalized);
+    }
+
     this.updatedAt = receivedAt;
     this.status = "connected";
     this.error = null;
-
-    if (!mutated && Array.isArray(data) && data.length === 0) {
-      this.logger.info({ mode: this.mode }, "position refresh confirmed: no open positions");
-    }
   }
 
   private handleOrderFrame(data: unknown): void {
     const receivedAt = Date.now();
-    let mutated = false;
-
-    const leverageFallbackBySymbol = new Map<string, number | null>();
-    for (const position of this.positions.values()) {
-      leverageFallbackBySymbol.set(position.symbol, position.leverage);
-    }
+    const leverageFallbackBySymbol = this.buildLeverageFallbackBySymbol();
 
     for (const item of parseMessageItems(data)) {
       const normalized = normalizeOrderRow(item, leverageFallbackBySymbol, receivedAt);
       const key = toOrderKey(item);
 
       if (!normalized) {
-        if (this.orders.delete(key)) mutated = true;
+        this.markOrderDeleted(key, receivedAt);
         continue;
       }
 
-      this.orders.set(key, normalized);
-      mutated = true;
+      this.orderDeletes.delete(key);
+      this.wsOrders.set(key, normalized);
     }
 
-    if (mutated) {
-      this.updatedAt = receivedAt;
-      this.status = "connected";
-      this.error = null;
-    }
+    this.updatedAt = receivedAt;
+    this.status = "connected";
+    this.error = null;
   }
 
   private connectPrivate(): void {
@@ -620,11 +607,6 @@ class BybitPrivateExecutionStream {
     this.status = this.privateReconnectAttempt > 0 ? "reconnecting" : "connecting";
     this.error = null;
     this.initialPrivateSubscribeDone = false;
-    this.bootstrapPositionResolved = false;
-    this.positionResubscribeInFlight = false;
-    this.positionRefreshAttemptStartedAt = null;
-    if (this.positionRefreshTimeoutTimer) clearTimeout(this.positionRefreshTimeoutTimer);
-    this.positionRefreshTimeoutTimer = null;
 
     const socket = new WebSocket(this.privateWsUrl);
     this.privateWs = socket;
@@ -685,43 +667,20 @@ class BybitPrivateExecutionStream {
 
         if (msg.op === "subscribe") {
           if (msg.success === true) {
-            if (!this.initialPrivateSubscribeDone) {
-              this.initialPrivateSubscribeDone = true;
-              this.status = "connected";
-              this.error = null;
-              this.positionRefreshCycleStartedAt = Date.now();
-              this.bootstrapPositionResolved = false;
-              void this.seedOrdersFromRest("subscribe_ok");
-              this.requestPositionResubscribe("subscribe_ok_bootstrap");
-              setTimeout(() => {
-                if (!this.shouldRun) return;
-                if (this.bootstrapPositionResolved) return;
-                this.requestPositionResubscribe("subscribe_ok_bootstrap_retry");
-              }, 3_000);
-            } else if (this.positionResubscribeInFlight) {
-              this.status = "connected";
-              this.error = null;
-            }
+            this.initialPrivateSubscribeDone = true;
+            this.status = "connected";
+            this.error = null;
+            void this.refreshFromRest("subscribe_ok");
             return;
           }
 
           this.status = "error";
           this.error = String(msg.ret_msg ?? "subscribe_failed");
           this.logger.error({ mode: this.mode, msg }, "private execution subscribe failed");
-          if (this.positionResubscribeInFlight) {
-            this.markPositionRefreshFailure("position_resubscribe_nack");
-          }
           return;
         }
 
-        if (msg.op === "unsubscribe") {
-          if (msg.success !== true && this.positionResubscribeInFlight) {
-            this.markPositionRefreshFailure("position_unsubscribe_nack");
-          }
-          return;
-        }
-
-        if (msg.op === "pong") {
+        if (msg.op === "unsubscribe" || msg.op === "pong") {
           return;
         }
 
@@ -792,8 +751,8 @@ export function createPrivatePositionsWs(app: {
 }) {
   const clients = new Map<WebSocket, ExecutionMode>();
 
-  const realOrdersSeedClient = new BybitRealRestClient();
-  const demoOrdersSeedClient = new BybitDemoRestClient();
+  const realRestClient = new BybitRealRestClient();
+  const demoRestClient = new BybitDemoRestClient();
 
   const realStream = new BybitPrivateExecutionStream(
     "real",
@@ -801,7 +760,7 @@ export function createPrivatePositionsWs(app: {
     process.env.BYBIT_PRIVATE_WS_URL ?? "wss://stream.bybit.com/v5/private",
     process.env.BYBIT_API_KEY ?? "",
     process.env.BYBIT_API_SECRET ?? "",
-    realOrdersSeedClient,
+    realRestClient,
   );
 
   const demoStream = new BybitPrivateExecutionStream(
@@ -810,7 +769,7 @@ export function createPrivatePositionsWs(app: {
     process.env.BYBIT_DEMO_PRIVATE_WS_URL ?? "wss://stream-demo.bybit.com/v5/private",
     process.env.BYBIT_DEMO_API_KEY ?? "",
     process.env.BYBIT_DEMO_API_SECRET ?? "",
-    demoOrdersSeedClient,
+    demoRestClient,
   );
 
   const getStream = (mode: ExecutionMode) => (mode === "real" ? realStream : demoStream);
@@ -837,6 +796,9 @@ export function createPrivatePositionsWs(app: {
       path: POSITIONS_WS_PATH,
     });
 
+    realStream.ensureStarted();
+    demoStream.ensureStarted();
+
     broadcastTimer = setInterval(() => {
       broadcastSnapshots();
     }, CLIENT_BROADCAST_INTERVAL_MS);
@@ -852,7 +814,6 @@ export function createPrivatePositionsWs(app: {
       })();
 
       clients.set(ws, mode);
-      getStream(mode).ensureStarted();
 
       safeSend(ws, {
         type: "hello",

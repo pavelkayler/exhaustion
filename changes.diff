@@ -1,0 +1,444 @@
+diff --git a/backend/src/api/privatePositionsWs.ts b/backend/src/api/privatePositionsWs.ts
+--- a/backend/src/api/privatePositionsWs.ts
++++ b/backend/src/api/privatePositionsWs.ts
+@@
+ type ServerMessage =
+   | { type: "hello"; payload: PositionsSnapshot }
+   | { type: "execution_snapshot"; payload: PositionsSnapshot }
+   | { type: "error"; message: string };
+ 
+-type OrdersSeedClient = {
++type PrivateExecutionRestClient = {
+   hasCredentials(): boolean;
+   getOpenOrdersLinear(params?: {
+     symbol?: string;
+     settleCoin?: string;
+     limit?: number;
+     cursor?: string;
+   }): Promise<{ list: Array<Record<string, unknown>> }>;
++  getPositionsLinear(params?: {
++    symbol?: string;
++    settleCoin?: string;
++  }): Promise<{ list: Array<Record<string, unknown>> }>;
+ };
+@@
+ const POSITION_RESUBSCRIBE_INTERVAL_MS = 60_000;
+ const POSITION_RESUBSCRIBE_TIMEOUT_MS = 8_000;
+ const POSITION_REFRESH_GUARD_INTERVAL_MS = 1_000;
+ const POSITION_BOOTSTRAP_RETRY_INTERVAL_MS = 10_000;
+ const POSITION_BOOTSTRAP_RETRY_MAX_MS = 60_000;
++const POSITION_REST_REFRESH_INTERVAL_MS = 60_000;
+@@
+ class BybitPrivateExecutionStream {
+   private privateWs: WebSocket | null = null;
+   private privateReconnectTimer: NodeJS.Timeout | null = null;
+   private privatePingTimer: NodeJS.Timeout | null = null;
+   private refreshGuardTimer: NodeJS.Timeout | null = null;
+   private positionRefreshTimeoutTimer: NodeJS.Timeout | null = null;
++  private restRefreshTimer: NodeJS.Timeout | null = null;
+   private privateReconnectAttempt = 0;
+   private initialPrivateSubscribeDone = false;
+   private bootstrapPositionResolved = false;
++  private restRefreshInFlight = false;
+ 
+   private shouldRun = false;
+   private status: FeedStatus;
+   private updatedAt: number | null = null;
+   private error: string | null = null;
+-  private positions = new Map<string, StoredPositionRow>();
+-  private orders = new Map<string, ExecutionOrderRow>();
++  private restPositions = new Map<string, StoredPositionRow>();
++  private wsPositions = new Map<string, StoredPositionRow>();
++  private wsDeletedPositionKeys = new Map<string, number>();
++  private restOrders = new Map<string, ExecutionOrderRow>();
++  private wsOrders = new Map<string, ExecutionOrderRow>();
++  private wsDeletedOrderKeys = new Map<string, number>();
+@@
+     private readonly logger: FastifyBaseLogger,
+     private readonly privateWsUrl: string,
+     private readonly apiKey: string,
+     private readonly apiSecret: string,
+-    private readonly ordersSeedClient: OrdersSeedClient | null,
++    private readonly restClient: PrivateExecutionRestClient | null,
+   ) {
+     this.status = this.hasCredentials() ? "connecting" : "missing_credentials";
+   }
+ 
+   hasCredentials(): boolean {
+     return this.apiKey.trim().length > 0 && this.apiSecret.trim().length > 0;
+   }
++
++  private getMergedPositions(): Map<string, StoredPositionRow> {
++    const merged = new Map<string, StoredPositionRow>(this.restPositions);
++    for (const key of this.wsDeletedPositionKeys.keys()) {
++      merged.delete(key);
++    }
++    for (const [key, row] of this.wsPositions.entries()) {
++      merged.set(key, row);
++    }
++    return merged;
++  }
++
++  private getMergedOrders(): Map<string, ExecutionOrderRow> {
++    const merged = new Map<string, ExecutionOrderRow>(this.restOrders);
++    for (const key of this.wsDeletedOrderKeys.keys()) {
++      merged.delete(key);
++    }
++    for (const [key, row] of this.wsOrders.entries()) {
++      merged.set(key, row);
++    }
++    return merged;
++  }
++
++  private pruneWsOverlayAfterRestRefresh(refreshStartedAt: number): void {
++    for (const [key, row] of this.wsPositions.entries()) {
++      if ((row.updatedAt ?? 0) <= refreshStartedAt) {
++        this.wsPositions.delete(key);
++      }
++    }
++
++    for (const [key, deletedAt] of this.wsDeletedPositionKeys.entries()) {
++      if (deletedAt <= refreshStartedAt) {
++        this.wsDeletedPositionKeys.delete(key);
++      }
++    }
++
++    for (const [key, row] of this.wsOrders.entries()) {
++      if ((row.updatedAt ?? 0) <= refreshStartedAt) {
++        this.wsOrders.delete(key);
++      }
++    }
++
++    for (const [key, deletedAt] of this.wsDeletedOrderKeys.entries()) {
++      if (deletedAt <= refreshStartedAt) {
++        this.wsDeletedOrderKeys.delete(key);
++      }
++    }
++  }
++
++  private startRestRefreshLoop(): void {
++    if (this.restRefreshTimer) clearInterval(this.restRefreshTimer);
++    this.restRefreshTimer = setInterval(() => {
++      void this.refreshFromRest("interval");
++    }, POSITION_REST_REFRESH_INTERVAL_MS);
++  }
++
++  private async refreshFromRest(reason: string): Promise<void> {
++    if (!this.shouldRun) return;
++    if (!this.restClient || !this.restClient.hasCredentials()) return;
++    if (this.restRefreshInFlight) return;
++
++    this.restRefreshInFlight = true;
++    const refreshStartedAt = Date.now();
++
++    try {
++      const [positionsResponse, ordersResponse] = await Promise.all([
++        this.restClient.getPositionsLinear({
++          settleCoin: "USDT",
++        }),
++        this.restClient.getOpenOrdersLinear({
++          settleCoin: "USDT",
++          limit: 50,
++        }),
++      ]);
++
++      const nextRestPositions = new Map<string, StoredPositionRow>();
++      for (const item of Array.isArray(positionsResponse?.list) ? positionsResponse.list : []) {
++        if (!item || typeof item !== "object") continue;
++        const normalized = normalizePositionRow(item, refreshStartedAt);
++        if (!normalized) continue;
++        nextRestPositions.set(normalized.key, normalized);
++      }
++
++      const leverageFallbackBySymbol = new Map<string, number | null>();
++      for (const position of nextRestPositions.values()) {
++        leverageFallbackBySymbol.set(position.symbol, position.leverage);
++      }
++      for (const position of this.wsPositions.values()) {
++        if ((position.updatedAt ?? 0) > refreshStartedAt) {
++          leverageFallbackBySymbol.set(position.symbol, position.leverage);
++        }
++      }
++
++      const nextRestOrders = new Map<string, ExecutionOrderRow>();
++      for (const item of Array.isArray(ordersResponse?.list) ? ordersResponse.list : []) {
++        if (!item || typeof item !== "object") continue;
++        const normalized = normalizeOrderRow(item, leverageFallbackBySymbol, refreshStartedAt);
++        if (!normalized) continue;
++        nextRestOrders.set(normalized.key, normalized);
++      }
++
++      this.restPositions = nextRestPositions;
++      this.restOrders = nextRestOrders;
++      this.pruneWsOverlayAfterRestRefresh(refreshStartedAt);
++      this.updatedAt = Date.now();
++      this.error = null;
++
++      this.logger.info(
++        {
++          mode: this.mode,
++          reason,
++          positions: nextRestPositions.size,
++          orders: nextRestOrders.size,
++        },
++        "private execution snapshot refreshed from rest",
++      );
++    } catch (error) {
++      this.logger.warn(
++        {
++          mode: this.mode,
++          reason,
++          error: String((error as Error)?.message ?? error),
++        },
++        "private execution rest refresh failed",
++      );
++    } finally {
++      this.restRefreshInFlight = false;
++    }
++  }
+ 
+   getSnapshot(): PositionsSnapshot {
+-    const positions = Array.from(this.positions.values()).sort((left, right) => {
++    const positions = Array.from(this.getMergedPositions().values()).sort((left, right) => {
+       const symbolCmp = left.symbol.localeCompare(right.symbol);
+       if (symbolCmp !== 0) return symbolCmp;
+       return left.key.localeCompare(right.key);
+     });
+ 
+-    const orders = Array.from(this.orders.values()).sort((left, right) => {
++    const orders = Array.from(this.getMergedOrders().values()).sort((left, right) => {
+       const symbolCmp = left.symbol.localeCompare(right.symbol);
+       if (symbolCmp !== 0) return symbolCmp;
+       return (left.placedAt ?? 0) - (right.placedAt ?? 0);
+     });
+@@
+     if (this.shouldRun) return;
+     this.shouldRun = true;
+     this.startRefreshGuard();
+-    void this.seedOrdersFromRest("ensure_started");
++    this.startRestRefreshLoop();
++    void this.refreshFromRest("ensure_started");
+     this.connectPrivate();
+   }
+ 
+   stop(): void {
+     this.shouldRun = false;
+ 
+     if (this.privateReconnectTimer) clearTimeout(this.privateReconnectTimer);
+     if (this.privatePingTimer) clearInterval(this.privatePingTimer);
+     if (this.refreshGuardTimer) clearInterval(this.refreshGuardTimer);
+     if (this.positionRefreshTimeoutTimer) clearTimeout(this.positionRefreshTimeoutTimer);
++    if (this.restRefreshTimer) clearInterval(this.restRefreshTimer);
+ 
+     this.privateReconnectTimer = null;
+     this.privatePingTimer = null;
+     this.refreshGuardTimer = null;
+     this.positionRefreshTimeoutTimer = null;
++    this.restRefreshTimer = null;
+ 
+     this.positionRefreshAttemptStartedAt = null;
+     this.positionRefreshFailureCount = 0;
+     this.positionResubscribeInFlight = false;
+     this.bootstrapPositionResolved = false;
++    this.restRefreshInFlight = false;
+@@
+-  private async seedOrdersFromRest(reason: string): Promise<void> {
+-    if (!this.shouldRun) return;
+-    if (!this.ordersSeedClient || !this.ordersSeedClient.hasCredentials()) return;
+-
+-    try {
+-      const response = await this.ordersSeedClient.getOpenOrdersLinear({
+-        settleCoin: "USDT",
+-        limit: 50,
+-      });
+-
+-      const leverageFallbackBySymbol = new Map<string, number | null>();
+-      for (const position of this.positions.values()) {
+-        leverageFallbackBySymbol.set(position.symbol, position.leverage);
+-      }
+-
+-      const receivedAt = Date.now();
+-      const nextOrders = new Map<string, ExecutionOrderRow>();
+-      for (const item of Array.isArray(response?.list) ? response.list : []) {
+-        if (!item || typeof item !== "object") continue;
+-        const normalized = normalizeOrderRow(item, leverageFallbackBySymbol, receivedAt);
+-        if (!normalized) continue;
+-        nextOrders.set(normalized.key, normalized);
+-      }
+-
+-      this.orders = nextOrders;
+-      this.updatedAt = receivedAt;
+-      this.error = null;
+-
+-      this.logger.info(
+-        {
+-          mode: this.mode,
+-          reason,
+-          orders: nextOrders.size,
+-        },
+-        "private execution orders seeded",
+-      );
+-    } catch (error) {
+-      this.logger.warn(
+-        {
+-          mode: this.mode,
+-          reason,
+-          error: String((error as Error)?.message ?? error),
+-        },
+-        "private execution orders seed failed",
+-      );
+-    }
+-  }
+-
+   private requestPositionResubscribe(reason: string): void {
+@@
+   private handlePositionFrame(data: unknown): void {
+     const receivedAt = Date.now();
+     const items = parseMessageItems(data);
+     let mutated = false;
+ 
+     if (Array.isArray(data) && data.length === 0) {
+-      if (this.positions.size > 0) {
+-        this.positions.clear();
+-        mutated = true;
++      const knownKeys = new Set<string>([
++        ...this.restPositions.keys(),
++        ...this.wsPositions.keys(),
++      ]);
++      this.wsPositions.clear();
++      for (const key of knownKeys) {
++        this.wsDeletedPositionKeys.set(key, receivedAt);
+       }
++      mutated = knownKeys.size > 0;
+     } else {
+       for (const item of items) {
+         const normalized = normalizePositionRow(item, receivedAt);
+         const key = toPositionKey(item);
+ 
+         if (!normalized) {
+-          if (this.positions.delete(key)) mutated = true;
++          this.wsPositions.delete(key);
++          this.wsDeletedPositionKeys.set(key, receivedAt);
++          mutated = true;
+           continue;
+         }
+ 
+-        this.positions.set(key, normalized);
++        this.wsDeletedPositionKeys.delete(key);
++        this.wsPositions.set(key, normalized);
+         mutated = true;
+       }
+     }
+@@
+   private handleOrderFrame(data: unknown): void {
+     const receivedAt = Date.now();
+     let mutated = false;
+ 
+     const leverageFallbackBySymbol = new Map<string, number | null>();
+-    for (const position of this.positions.values()) {
++    for (const position of this.getMergedPositions().values()) {
+       leverageFallbackBySymbol.set(position.symbol, position.leverage);
+     }
++
++    if (Array.isArray(data) && data.length === 0) {
++      const knownKeys = new Set<string>([
++        ...this.restOrders.keys(),
++        ...this.wsOrders.keys(),
++      ]);
++      this.wsOrders.clear();
++      for (const key of knownKeys) {
++        this.wsDeletedOrderKeys.set(key, receivedAt);
++      }
++      mutated = knownKeys.size > 0;
++    }
+ 
+     for (const item of parseMessageItems(data)) {
+       const normalized = normalizeOrderRow(item, leverageFallbackBySymbol, receivedAt);
+       const key = toOrderKey(item);
+ 
+       if (!normalized) {
+-        if (this.orders.delete(key)) mutated = true;
++        this.wsOrders.delete(key);
++        this.wsDeletedOrderKeys.set(key, receivedAt);
++        mutated = true;
+         continue;
+       }
+ 
+-      this.orders.set(key, normalized);
++      this.wsDeletedOrderKeys.delete(key);
++      this.wsOrders.set(key, normalized);
+       mutated = true;
+     }
+@@
+             if (!this.initialPrivateSubscribeDone) {
+               this.initialPrivateSubscribeDone = true;
+               this.status = "connected";
+               this.error = null;
+               this.positionRefreshCycleStartedAt = Date.now();
+               this.bootstrapPositionResolved = false;
+-              void this.seedOrdersFromRest("subscribe_ok");
++              void this.refreshFromRest("subscribe_ok");
+               this.requestPositionResubscribe("subscribe_ok_bootstrap");
+               setTimeout(() => {
+                 if (!this.shouldRun) return;
+                 if (this.bootstrapPositionResolved) return;
+                 this.requestPositionResubscribe("subscribe_ok_bootstrap_retry");
+@@
+   app.addHook("onReady", async () => {
+     wss = new WebSocketServer({
+       host,
+       port,
+       path: POSITIONS_WS_PATH,
+@@
+     broadcastTimer = setInterval(() => {
+       broadcastSnapshots();
+     }, CLIENT_BROADCAST_INTERVAL_MS);
++
++    demoStream.ensureStarted();
++    realStream.ensureStarted();
+ 
+     wss.on("connection", (ws, request) => {
+       const mode = (() => {
+         try {
+           const url = new URL(request.url ?? POSITIONS_WS_PATH, "http://localhost");
+diff --git a/backend/src/index.ts b/backend/src/index.ts
+--- a/backend/src/index.ts
++++ b/backend/src/index.ts
+@@
+ import {
+   registerHttpRoutes,
+   requestOptimizerGracefulPauseAndFlush,
+   setShutdownHandler,
+ } from "./api/http.js";
+-import { createWsHub } from "./api/wsHub.js";
++import { awaitAllStreamsConnected, createWsHub } from "./api/wsHub.js";
+ import { createPrivatePositionsWs } from "./api/privatePositionsWs.js";
+ import { runtime } from "./runtime/runtime.js";
+ import { ServerLogStream } from "./logging/ServerLogStream.js";
+ import { startTopOpenInterestUniverseScheduler } from "./runtime/topOpenInterestUniverse.js";
+@@
+   await app.listen({ port, host });
++
++  const bootStatus = await runtime.start({
++    waitForReady: async ({ signal }) => {
++      await awaitAllStreamsConnected({
++        timeoutMs: 15_000,
++        signal,
++      });
++    },
++  });
++
++  if (bootStatus.sessionState !== "RUNNING") {
++    app.log.error(
++      {
++        sessionState: bootStatus.sessionState,
++        runtimeMessage: bootStatus.runtimeMessage,
++      },
++      "runtime auto-start on boot did not reach RUNNING",
++    );
++  }
+ 
+   app.log.info(
+     { host, port, bootSessionId: serverLogStream.bootSessionId },
+     "backend listening",
+   );

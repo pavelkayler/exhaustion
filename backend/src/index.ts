@@ -83,7 +83,7 @@ import {
   requestOptimizerGracefulPauseAndFlush,
   setShutdownHandler,
 } from "./api/http.js";
-import { createWsHub } from "./api/wsHub.js";
+import { awaitAllStreamsConnected, createWsHub } from "./api/wsHub.js";
 import { createPrivatePositionsWs } from "./api/privatePositionsWs.js";
 import { runtime } from "./runtime/runtime.js";
 import { ServerLogStream } from "./logging/ServerLogStream.js";
@@ -146,6 +146,60 @@ export async function buildApp() {
   return app;
 }
 
+function shouldAutoStartRuntime(): boolean {
+  const raw = String(
+    process.env.AUTO_START_RUNTIME ??
+      process.env.AUTO_START_SESSION ??
+      "1",
+  )
+    .trim()
+    .toLowerCase();
+
+  return raw !== "0" && raw !== "false" && raw !== "off" && raw !== "no";
+}
+
+async function autoStartRuntime(app: Awaited<ReturnType<typeof buildApp>>) {
+  if (!shouldAutoStartRuntime()) {
+    app.log.info("runtime auto-start disabled");
+    return;
+  }
+
+  try {
+    const status = await runtime.start({
+      waitForReady: async ({ signal }) => {
+        await awaitAllStreamsConnected({
+          timeoutMs: 15_000,
+          signal,
+        });
+      },
+    });
+
+    if (status.sessionState === "RUNNING") {
+      app.log.info(
+        {
+          sessionState: status.sessionState,
+          runningBotName: status.runningBotName,
+        },
+        "runtime auto-started",
+      );
+      return;
+    }
+
+    app.log.warn(
+      {
+        sessionState: status.sessionState,
+        runtimeMessage: status.runtimeMessage,
+      },
+      "runtime auto-start finished without RUNNING state",
+    );
+  } catch (error) {
+    app.log.error(
+      { error: String((error as Error)?.message ?? error) },
+      "runtime auto-start failed",
+    );
+  }
+}
+
 async function main() {
   const port = Number(process.env.PORT ?? 8080);
   const host = process.env.HOST ?? "0.0.0.0";
@@ -194,6 +248,8 @@ async function main() {
     { host, port, bootSessionId: serverLogStream.bootSessionId },
     "backend listening",
   );
+
+  await autoStartRuntime(app);
 }
 
 main().catch((err) => {
