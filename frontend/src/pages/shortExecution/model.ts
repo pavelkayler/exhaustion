@@ -1,19 +1,6 @@
-export type ExecutorLocalSettings = {
-  mode: "demo" | "real";
-  maxUsdt: number;
-  leverage: number;
-  tpPct: number;
-  slPct: number;
-  firstOrderOffsetPct: number;
-  gridOrdersCount: number;
-  gridStepPct: number;
-  staleSec: number;
-  cooldownMin: number;
-  trackCandidateSignalsForResearch: boolean;
-  takeCandidateSignalsInLiveExecution: boolean;
-  takeFinalSignals: boolean;
-  cancelActivePositionOrders: boolean;
-};
+import type { ExecutorSettings } from "../../shared/types/domain";
+
+export type ExecutorLocalSettings = ExecutorSettings;
 
 export const DEFAULT_EXECUTOR_LOCAL_SETTINGS: ExecutorLocalSettings = {
   mode: "demo",
@@ -30,6 +17,7 @@ export const DEFAULT_EXECUTOR_LOCAL_SETTINGS: ExecutorLocalSettings = {
   takeCandidateSignalsInLiveExecution: true,
   takeFinalSignals: true,
   cancelActivePositionOrders: true,
+  exit: "full",
 };
 
 export type NumericFieldKey =

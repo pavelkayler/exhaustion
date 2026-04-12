@@ -2,11 +2,9 @@ import { Col, Container, Row } from "react-bootstrap";
 import { HeaderBar } from "../dashboard/components/HeaderBar";
 import { useSessionRuntime } from "../../features/session/hooks/useSessionRuntime";
 import { useWsFeed } from "../../features/ws/hooks/useWsFeed";
-import { usePersistentState } from "../../shared/hooks/usePersistentState";
 import { usePrivatePositionsFeed } from "../../features/positions/hooks/usePrivatePositionsFeed";
+import { useExecutorRuntime } from "../../features/executor/hooks/useExecutorRuntime";
 import {
-  DEFAULT_EXECUTOR_LOCAL_SETTINGS,
-  type ExecutorLocalSettings,
   type NumericFieldKey,
 } from "./model";
 import { ExecutionHeaderCard } from "./components/ExecutionHeaderCard";
@@ -29,34 +27,50 @@ export function ShortExecutionPage() {
     canResume,
   } = useSessionRuntime();
 
-  const [settings, setSettings] = usePersistentState<ExecutorLocalSettings>(
-    "short-execution.local-settings",
-    DEFAULT_EXECUTOR_LOCAL_SETTINGS,
-  );
+  const executor = useExecutorRuntime({ pollMs: 4_000 });
 
-  const executionFeed = usePrivatePositionsFeed(settings.mode);
+  const effectiveMode =
+    executor.desiredRunning && executor.activeSettings
+      ? executor.activeSettings.mode
+      : executor.settings.mode;
+
+  const executionFeed = usePrivatePositionsFeed(effectiveMode);
 
   const updateNumber = (key: NumericFieldKey, value: string) => {
     const numeric = Number(value);
-    setSettings((prev) => ({
-      ...prev,
-      [key]: Number.isFinite(numeric) ? numeric : prev[key],
-    }));
+    if (!Number.isFinite(numeric)) return;
+    void executor.updateSettings({ [key]: numeric });
   };
 
-  const updateBoolean = (key: keyof ExecutorLocalSettings, value: boolean) => {
-    setSettings((prev) => ({
-      ...prev,
-      [key]: value,
-    }));
+  const updateBoolean = (
+    key: keyof typeof executor.settings,
+    value: boolean,
+  ) => {
+    void executor.updateSettings({ [key]: value });
   };
 
   const updateMode = (mode: "demo" | "real") => {
-    setSettings((prev) => ({
-      ...prev,
-      mode,
-    }));
+    void executor.updateSettings({ mode });
   };
+
+  const updateExit = (exit: typeof executor.settings.exit) => {
+    void executor.updateSettings({ exit });
+  };
+
+  const sessionActive =
+    status.sessionState === "RUNNING" ||
+    status.sessionState === "PAUSED" ||
+    status.sessionState === "PAUSING" ||
+    status.sessionState === "RESUMING";
+
+  const canStartTracking =
+    sessionActive &&
+    executor.busy === "none" &&
+    !executor.desiredRunning;
+
+  const canStopTracking =
+    executor.busy === "none" &&
+    executor.desiredRunning;
 
   return (
     <>
@@ -79,7 +93,7 @@ export function ShortExecutionPage() {
       />
 
       <Container fluid className="py-3 px-2">
-        <ExecutionHeaderCard mode={settings.mode} feedStatus={executionFeed.status} />
+        <ExecutionHeaderCard mode={effectiveMode} feedStatus={executionFeed.status} />
 
         <Row className="g-3">
           <Col xs={12}>
@@ -103,8 +117,16 @@ export function ShortExecutionPage() {
 
           <Col xs={12}>
             <ExecutionSettingsCard
-              settings={settings}
+              settings={executor.settings}
+              executorStatus={executor.status}
+              executorError={executor.error}
+              executorBusy={executor.busy}
+              canStartTracking={canStartTracking}
+              canStopTracking={canStopTracking}
+              onStartTracking={() => void executor.start()}
+              onStopTracking={() => void executor.stop()}
               onModeChange={updateMode}
+              onExitChange={updateExit}
               onUpdateNumber={updateNumber}
               onUpdateBoolean={updateBoolean}
             />

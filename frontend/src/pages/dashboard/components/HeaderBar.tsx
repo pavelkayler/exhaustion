@@ -3,6 +3,7 @@ import { Badge, Button, Container, Nav, Navbar, Spinner } from "react-bootstrap"
 import { Link } from "react-router-dom";
 import { preloadRoute } from "../../../app/routing/routes";
 import { AppContext } from "../../../app/providers/context/AppContext";
+import { useExecutorStatusLite } from "../../../features/executor/hooks/useExecutorRuntime";
 import { useStableStreamsStatus } from "../../../features/ws/hooks/useStableStreamsStatus";
 import type { ConnStatus, SessionState, StreamsState } from "../../../shared/types/domain";
 
@@ -27,7 +28,20 @@ type Props = {
 
 export function HeaderBar(props: Props) {
   const { appName, appUpdatedDate, appVersion } = useContext(AppContext);
-  const { conn, sessionState, runningBotName, lastServerTime, streams, canStart, canStop, busy, onStart, onStop, overlayError } = props;
+  const executor = useExecutorStatusLite({ pollMs: 5_000 });
+  const {
+    conn,
+    sessionState,
+    runningBotName,
+    lastServerTime,
+    streams,
+    canStart,
+    canStop,
+    busy,
+    onStart,
+    onStop,
+    overlayError,
+  } = props;
   const stableStreams = useStableStreamsStatus(streams);
 
   const connVariant = conn === "CONNECTED" ? "success" : conn === "CONNECTING" || conn === "RECONNECTING" ? "warning" : "danger";
@@ -35,6 +49,7 @@ export function HeaderBar(props: Props) {
   const streamsVariant = !stableStreams.streamsEnabled ? "secondary" : stableStreams.bybitConnected ? "success" : "warning";
   const streamsText = !stableStreams.streamsEnabled ? "Streams: OFF" : stableStreams.bybitConnected ? "Streams: ON" : "Streams: ON (reconnecting)";
   const showRunningBot = sessionState !== "STOPPED" && Boolean(String(runningBotName ?? "").trim());
+  const showExecutorRunning = executor.status === "running";
   const preloadNavRoute = (path: string) => {
     void preloadRoute(path);
   };
@@ -60,6 +75,11 @@ export function HeaderBar(props: Props) {
             <Badge bg={connVariant} className="genesis-topbar-fixed-badge">{conn}</Badge>
             <Badge bg={streamsVariant} className="genesis-topbar-fixed-badge">{streamsText}</Badge>
             <Badge bg={sessionVariant} className="genesis-topbar-fixed-badge">Session: {sessionState}</Badge>
+            {showExecutorRunning ? (
+              <Badge bg="warning" text="dark" className="genesis-topbar-fixed-badge">
+                Executor: RUNNING
+              </Badge>
+            ) : null}
             {showRunningBot ? <Badge bg="info" text="dark">Bot: {runningBotName}</Badge> : null}
           </div>
           <div className="genesis-topbar-actions">

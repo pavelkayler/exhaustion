@@ -2,7 +2,17 @@ import fs from "node:fs";
 import type { FastifyInstance } from "fastify";
 import { runtime } from "../runtime/runtime.js";
 import { configStore } from "../runtime/configStore.js";
-import { awaitAllStreamsConnected, requestStreamLifecycleSync, submitManualTestOrder } from "./wsHub.js";
+import {
+  awaitAllStreamsConnected,
+  requestStreamLifecycleSync,
+  submitManualTestOrder,
+} from "./wsHub.js";
+import {
+  getExecutionExecutorState,
+  startExecutionExecutor,
+  stopExecutionExecutor,
+  updateExecutionExecutorSettings,
+} from "./privatePositionsWs.js";
 
 let shutdownHandler: (() => Promise<void> | void) | null = null;
 
@@ -60,6 +70,28 @@ export function registerHttpRoutes(app: FastifyInstance) {
   app.post("/api/session/stop", async () => await runtime.stop("manual_stop"));
   app.post("/api/session/pause", async () => runtime.pause());
   app.post("/api/session/resume", async () => runtime.resume());
+
+  app.get("/api/executor/status", async () => getExecutionExecutorState());
+
+  app.post("/api/executor/settings", async (req) => {
+    return updateExecutionExecutorSettings((req.body ?? {}) as Record<string, unknown>);
+  });
+
+  app.post("/api/executor/start", async (_req, reply) => {
+    try {
+      return await startExecutionExecutor();
+    } catch (error) {
+      reply.code(400);
+      return {
+        ...getExecutionExecutorState(),
+        error: String((error as Error)?.message ?? error),
+      };
+    }
+  });
+
+  app.post("/api/executor/stop", async () => {
+    return await stopExecutionExecutor();
+  });
 
   app.get("/api/process/status", async () => {
     const status = runtime.getStatus();

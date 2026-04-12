@@ -116,6 +116,36 @@ export type StatusResponse = {
   runningBotName: string | null;
 };
 
+export type ExecutorExitMode = "full" | "partial_and_trailing" | "trailing";
+export type ExecutorStatus = "stopped" | "starting" | "running" | "waiting_session" | "error";
+
+export type ExecutorSettings = {
+  mode: "demo" | "real";
+  maxUsdt: number;
+  leverage: number;
+  tpPct: number;
+  slPct: number;
+  firstOrderOffsetPct: number;
+  gridOrdersCount: number;
+  gridStepPct: number;
+  staleSec: number;
+  cooldownMin: number;
+  trackCandidateSignalsForResearch: boolean;
+  takeCandidateSignalsInLiveExecution: boolean;
+  takeFinalSignals: boolean;
+  cancelActivePositionOrders: boolean;
+  exit: ExecutorExitMode;
+};
+
+export type ExecutorStatusResponse = {
+  settings: ExecutorSettings;
+  activeSettings: ExecutorSettings | null;
+  desiredRunning: boolean;
+  status: ExecutorStatus;
+  error: string | null;
+  updatedAt: number | null;
+};
+
 export type ShortOiSpikeWatchlistRecord = {
   symbol: string;
   turnover24hUsd: number | null;
