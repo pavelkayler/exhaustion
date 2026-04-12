@@ -76,8 +76,9 @@ const PRIVATE_WS_PING_INTERVAL_MS = 20_000;
 const CLIENT_BROADCAST_INTERVAL_MS = 1_000;
 const POSITION_RESUBSCRIBE_INTERVAL_MS = 60_000;
 const POSITION_RESUBSCRIBE_TIMEOUT_MS = 8_000;
-const POSITION_RESUBSCRIBE_ESCALATE_MS = 5 * 60_000;
 const POSITION_REFRESH_GUARD_INTERVAL_MS = 1_000;
+const POSITION_BOOTSTRAP_RETRY_INTERVAL_MS = 10_000;
+const POSITION_BOOTSTRAP_RETRY_MAX_MS = 60_000;
 
 function normalizeMode(value: unknown): ExecutionMode {
   return String(value ?? "").trim().toLowerCase() === "real" ? "real" : "demo";
@@ -264,6 +265,7 @@ class BybitPrivateExecutionStream {
   private positionRefreshTimeoutTimer: NodeJS.Timeout | null = null;
   private privateReconnectAttempt = 0;
   private initialPrivateSubscribeDone = false;
+  private bootstrapPositionResolved = false;
 
   private shouldRun = false;
   private status: FeedStatus;
@@ -345,6 +347,7 @@ class BybitPrivateExecutionStream {
     this.positionRefreshAttemptStartedAt = null;
     this.positionRefreshFailureCount = 0;
     this.positionResubscribeInFlight = false;
+    this.bootstrapPositionResolved = false;
 
     try {
       this.privateWs?.close();
@@ -366,18 +369,31 @@ class BybitPrivateExecutionStream {
     if (this.status !== "connected") return;
     if (this.positionResubscribeInFlight) return;
 
+    const now = Date.now();
     const baseAt = this.lastPositionFrameAt ?? this.positionRefreshCycleStartedAt;
     if (!(Number(baseAt) > 0)) return;
 
-    const elapsedMs = Date.now() - Number(baseAt);
+    if (!this.bootstrapPositionResolved) {
+      const bootstrapElapsedMs = now - Number(this.positionRefreshCycleStartedAt ?? baseAt);
+
+      if (this.lastPositionFrameAt != null) {
+        this.bootstrapPositionResolved = true;
+      } else if (bootstrapElapsedMs >= POSITION_BOOTSTRAP_RETRY_MAX_MS) {
+        this.bootstrapPositionResolved = true;
+      } else if (bootstrapElapsedMs >= POSITION_BOOTSTRAP_RETRY_INTERVAL_MS) {
+        this.requestPositionResubscribe(
+          `position_bootstrap_${Math.floor(bootstrapElapsedMs / POSITION_BOOTSTRAP_RETRY_INTERVAL_MS)}`,
+        );
+        return;
+      }
+    }
+
+    const elapsedMs = now - Number(baseAt);
     if (elapsedMs < POSITION_RESUBSCRIBE_INTERVAL_MS) return;
 
     const minutesSinceBase = Math.floor(elapsedMs / POSITION_RESUBSCRIBE_INTERVAL_MS);
 
-    if (
-      minutesSinceBase >= 5 &&
-      this.positionRefreshFailureCount >= 4
-    ) {
+    if (minutesSinceBase >= 5 && this.positionRefreshFailureCount >= 4) {
       this.logger.warn(
         {
           mode: this.mode,
@@ -482,6 +498,7 @@ class BybitPrivateExecutionStream {
     this.positionRefreshCycleStartedAt = receivedAt;
     this.positionRefreshFailureCount = 0;
     this.positionResubscribeInFlight = false;
+    this.bootstrapPositionResolved = true;
     if (this.positionRefreshTimeoutTimer) clearTimeout(this.positionRefreshTimeoutTimer);
     this.positionRefreshTimeoutTimer = null;
     this.positionRefreshAttemptStartedAt = null;
@@ -516,6 +533,7 @@ class BybitPrivateExecutionStream {
     const socket = this.privateWs;
     this.privateWs = null;
     this.initialPrivateSubscribeDone = false;
+    this.bootstrapPositionResolved = false;
     this.status = "reconnecting";
 
     try {
@@ -602,6 +620,7 @@ class BybitPrivateExecutionStream {
     this.status = this.privateReconnectAttempt > 0 ? "reconnecting" : "connecting";
     this.error = null;
     this.initialPrivateSubscribeDone = false;
+    this.bootstrapPositionResolved = false;
     this.positionResubscribeInFlight = false;
     this.positionRefreshAttemptStartedAt = null;
     if (this.positionRefreshTimeoutTimer) clearTimeout(this.positionRefreshTimeoutTimer);
@@ -671,8 +690,14 @@ class BybitPrivateExecutionStream {
               this.status = "connected";
               this.error = null;
               this.positionRefreshCycleStartedAt = Date.now();
+              this.bootstrapPositionResolved = false;
               void this.seedOrdersFromRest("subscribe_ok");
               this.requestPositionResubscribe("subscribe_ok_bootstrap");
+              setTimeout(() => {
+                if (!this.shouldRun) return;
+                if (this.bootstrapPositionResolved) return;
+                this.requestPositionResubscribe("subscribe_ok_bootstrap_retry");
+              }, 3_000);
             } else if (this.positionResubscribeInFlight) {
               this.status = "connected";
               this.error = null;
