@@ -441,9 +441,9 @@ function resolvePositionIdx(position: StoredPositionRow): number {
   if (Number.isFinite(position.positionIdx as number)) {
     return Math.max(0, Math.floor(Number(position.positionIdx)));
   }
-  const side = String(position.side ?? '').trim().toUpperCase();
-  if (side === 'BUY') return 1;
-  if (side === 'SELL') return 2;
+  const side = String(position.side ?? "").trim().toUpperCase();
+  if (side === "BUY") return 1;
+  if (side === "SELL") return 2;
   return 0;
 }
 
@@ -693,29 +693,30 @@ class BybitPrivateExecutionStream {
       });
 
       const nextPositions = new Map<string, StoredPositionRow>();
+      const seenPositionKeys = new Set<string>();
       for (const item of Array.isArray(positionsResponse?.list) ? positionsResponse.list : []) {
         if (!item || typeof item !== "object") continue;
+        const key = toPositionKey(item);
+        seenPositionKeys.add(key);
         const normalized = normalizePositionRow(
           item,
-          this.restPositions.get(toPositionKey(item)) ?? null,
+          this.restPositions.get(key) ?? null,
           refreshedAt,
         );
         if (!normalized) continue;
         nextPositions.set(normalized.key, normalized);
       }
 
-      const previousPositionKeys = new Set<string>([
-        ...this.restPositions.keys(),
-        ...this.wsPositions.keys(),
-      ]);
+      for (const staleKey of this.restPositions.keys()) {
+        if (!seenPositionKeys.has(staleKey)) {
+          this.positionDeletes.set(staleKey, refreshedAt);
+        }
+      }
+
       this.restPositions.clear();
       for (const [key, value] of nextPositions.entries()) {
-        this.restPositions.set(key, value);
         this.positionDeletes.delete(key);
-        previousPositionKeys.delete(key);
-      }
-      for (const staleKey of previousPositionKeys) {
-        this.positionDeletes.set(staleKey, refreshedAt);
+        this.restPositions.set(key, value);
       }
 
       let ordersCount = this.getMergedOrders().length;
@@ -726,25 +727,24 @@ class BybitPrivateExecutionStream {
           limit: 50,
         });
         const nextOrders = new Map<string, StoredOrderRow>();
+        const seenOrderKeys = new Set<string>();
         for (const item of Array.isArray(ordersResponse?.list) ? ordersResponse.list : []) {
           if (!item || typeof item !== "object") continue;
+          const key = toOrderKey(item);
+          seenOrderKeys.add(key);
           const normalized = normalizeOrderRow(item, leverageFallbackBySymbol, refreshedAt);
           if (!normalized) continue;
           nextOrders.set(normalized.key, normalized);
         }
-
-        const previousOrderKeys = new Set<string>([
-          ...this.restOrders.keys(),
-          ...this.wsOrders.keys(),
-        ]);
+        for (const staleKey of this.restOrders.keys()) {
+          if (!seenOrderKeys.has(staleKey)) {
+            this.orderDeletes.set(staleKey, refreshedAt);
+          }
+        }
         this.restOrders.clear();
         for (const [key, value] of nextOrders.entries()) {
-          this.restOrders.set(key, value);
           this.orderDeletes.delete(key);
-          previousOrderKeys.delete(key);
-        }
-        for (const staleKey of previousOrderKeys) {
-          this.orderDeletes.set(staleKey, refreshedAt);
+          this.restOrders.set(key, value);
         }
         ordersCount = nextOrders.size;
       }
@@ -1143,7 +1143,11 @@ class PrivateExecutionExecutorManager {
           instrument.tickSize,
         );
 
-        if ((position.trailingStop ?? null) != null) {
+        const needsTrailingClear = (position.trailingStop ?? null) != null;
+        const needsTpReset = (position.tp ?? null) != null && !sameWithinStep(position.tp, targetTp, instrument.tickSize);
+        const needsSlReset = (position.sl ?? null) != null && !sameWithinStep(position.sl, targetSl, instrument.tickSize);
+
+        if (needsTrailingClear) {
           this.logger.info(
             { symbol: position.symbol, positionIdx, patch: { trailingStop: "0" } },
             "private execution executor apply trading stop patch",
@@ -1155,33 +1159,55 @@ class PrivateExecutionExecutorManager {
           });
         }
 
-        if (!sameWithinStep(position.tp, targetTp, instrument.tickSize)) {
+        if (needsTpReset) {
           this.logger.info(
-            { symbol: position.symbol, positionIdx, patch: { tpslMode: "Full", takeProfit: formatForApi(targetTp), tpTriggerBy: "LastPrice" } },
+            { symbol: position.symbol, positionIdx, patch: { tpslMode: "Full", takeProfit: "0" } },
             "private execution executor apply trading stop patch",
           );
           await restClient.setTradingStopLinear({
             symbol: position.symbol,
             positionIdx,
             tpslMode: "Full",
-            takeProfit: formatForApi(targetTp),
-            tpTriggerBy: "LastPrice",
+            takeProfit: "0",
           });
         }
 
-        if (!sameWithinStep(position.sl, targetSl, instrument.tickSize)) {
+        if (needsSlReset) {
           this.logger.info(
-            { symbol: position.symbol, positionIdx, patch: { tpslMode: "Full", stopLoss: formatForApi(targetSl), slTriggerBy: "LastPrice" } },
+            { symbol: position.symbol, positionIdx, patch: { tpslMode: "Full", stopLoss: "0" } },
             "private execution executor apply trading stop patch",
           );
           await restClient.setTradingStopLinear({
             symbol: position.symbol,
             positionIdx,
             tpslMode: "Full",
-            stopLoss: formatForApi(targetSl),
-            slTriggerBy: "LastPrice",
+            stopLoss: "0",
           });
         }
+
+        this.logger.info(
+          { symbol: position.symbol, positionIdx, patch: { tpslMode: "Full", takeProfit: formatForApi(targetTp), tpTriggerBy: "LastPrice" } },
+          "private execution executor apply trading stop patch",
+        );
+        await restClient.setTradingStopLinear({
+          symbol: position.symbol,
+          positionIdx,
+          tpslMode: "Full",
+          takeProfit: formatForApi(targetTp),
+          tpTriggerBy: "LastPrice",
+        });
+
+        this.logger.info(
+          { symbol: position.symbol, positionIdx, patch: { tpslMode: "Full", stopLoss: formatForApi(targetSl), slTriggerBy: "LastPrice" } },
+          "private execution executor apply trading stop patch",
+        );
+        await restClient.setTradingStopLinear({
+          symbol: position.symbol,
+          positionIdx,
+          tpslMode: "Full",
+          stopLoss: formatForApi(targetSl),
+          slTriggerBy: "LastPrice",
+        });
 
         stream.applyOptimisticProtection(position.key, {
           tp: targetTp,

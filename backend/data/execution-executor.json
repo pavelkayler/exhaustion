@@ -4,7 +4,7 @@
     "maxUsdt": 100,
     "leverage": 10,
     "tpPct": 3,
-    "slPct": 2,
+    "slPct": 4,
     "firstOrderOffsetPct": 0.6,
     "gridOrdersCount": 2,
     "gridStepPct": 1.2,
@@ -16,8 +16,8 @@
     "cancelActivePositionOrders": true,
     "exit": "full"
   },
-  "running": false,
+  "running": true,
   "error": null,
-  "updatedAt": 1776009643279,
+  "updatedAt": 1776011319217,
   "positionStates": {}
 }
