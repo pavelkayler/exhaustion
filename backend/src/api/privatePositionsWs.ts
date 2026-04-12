@@ -704,9 +704,18 @@ class BybitPrivateExecutionStream {
         nextPositions.set(normalized.key, normalized);
       }
 
+      const previousPositionKeys = new Set<string>([
+        ...this.restPositions.keys(),
+        ...this.wsPositions.keys(),
+      ]);
       this.restPositions.clear();
       for (const [key, value] of nextPositions.entries()) {
         this.restPositions.set(key, value);
+        this.positionDeletes.delete(key);
+        previousPositionKeys.delete(key);
+      }
+      for (const staleKey of previousPositionKeys) {
+        this.positionDeletes.set(staleKey, refreshedAt);
       }
 
       let ordersCount = this.getMergedOrders().length;
@@ -723,9 +732,19 @@ class BybitPrivateExecutionStream {
           if (!normalized) continue;
           nextOrders.set(normalized.key, normalized);
         }
+
+        const previousOrderKeys = new Set<string>([
+          ...this.restOrders.keys(),
+          ...this.wsOrders.keys(),
+        ]);
         this.restOrders.clear();
         for (const [key, value] of nextOrders.entries()) {
           this.restOrders.set(key, value);
+          this.orderDeletes.delete(key);
+          previousOrderKeys.delete(key);
+        }
+        for (const staleKey of previousOrderKeys) {
+          this.orderDeletes.set(staleKey, refreshedAt);
         }
         ordersCount = nextOrders.size;
       }
