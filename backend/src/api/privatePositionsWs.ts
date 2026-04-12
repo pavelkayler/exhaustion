@@ -332,7 +332,15 @@ function normalizeOrderRow(
     ?? ((entryPrice != null && qty != null) ? entryPrice * qty : null);
 
   const leverage = readPositiveNumber(row.leverage) ?? leverageFallbackBySymbol.get(symbol) ?? null;
-  const margin = value != null && leverage != null && leverage > 0 ? value / leverage : null;
+  const margin =
+    readPositiveNumber(row.orderMargin)
+    ?? readPositiveNumber(row.orderIM)
+    ?? readPositiveNumber(row.positionIM)
+    ?? readPositiveNumber(row.positionBalance)
+    ?? readPositiveNumber(row.requiredMargin)
+    ?? readPositiveNumber(row.initialMargin)
+    ?? readPositiveNumber(row.leavesValue)
+    ?? (value != null && leverage != null && leverage > 0 ? value / leverage : null);
 
   return {
     key,
@@ -465,6 +473,8 @@ class BybitPrivateExecutionStream {
   private readonly restOrders = new Map<string, StoredOrderRow>();
   private readonly wsOrders = new Map<string, StoredOrderRow>();
   private readonly orderDeletes = new Map<string, number>();
+  private readonly restLeverageHints = new Map<string, number | null>();
+  private readonly wsLeverageHints = new Map<string, number | null>();
 
   private readonly listeners = new Set<(snapshot: PositionsSnapshot) => void>();
 
@@ -503,6 +513,13 @@ class BybitPrivateExecutionStream {
         continue;
       }
     }
+  }
+
+  private rememberLeverageHint(target: Map<string, number | null>, row: Record<string, unknown>): void {
+    const symbol = String(row.symbol ?? "").trim().toUpperCase();
+    const leverage = readPositiveNumber(row.leverage);
+    if (!symbol || leverage == null) return;
+    target.set(symbol, leverage);
   }
 
   ensureStarted(): void {
@@ -664,17 +681,42 @@ class BybitPrivateExecutionStream {
       }
     }
 
-    return Array.from(visible.values()).sort((left, right) => {
-      const symbolCmp = left.symbol.localeCompare(right.symbol);
-      if (symbolCmp !== 0) return symbolCmp;
-      return Number(left.placedAt ?? 0) - Number(right.placedAt ?? 0);
-    });
+    const leverageFallbackBySymbol = this.buildLeverageFallbackBySymbol();
+
+    return Array.from(visible.values())
+      .map((row) => {
+        const leverage = row.leverage ?? leverageFallbackBySymbol.get(row.symbol) ?? null;
+        const margin =
+          row.margin
+          ?? ((row.value != null && leverage != null && leverage > 0) ? row.value / leverage : null);
+        if (leverage === row.leverage && margin === row.margin) {
+          return row;
+        }
+        return {
+          ...row,
+          leverage,
+          margin,
+        };
+      })
+      .sort((left, right) => {
+        const symbolCmp = left.symbol.localeCompare(right.symbol);
+        if (symbolCmp !== 0) return symbolCmp;
+        return Number(left.placedAt ?? 0) - Number(right.placedAt ?? 0);
+      });
   }
 
   private buildLeverageFallbackBySymbol(): Map<string, number | null> {
     const fallback = new Map<string, number | null>();
+    for (const [symbol, leverage] of this.restLeverageHints.entries()) {
+      fallback.set(symbol, leverage);
+    }
+    for (const [symbol, leverage] of this.wsLeverageHints.entries()) {
+      fallback.set(symbol, leverage);
+    }
     for (const position of this.getMergedPositions()) {
-      fallback.set(position.symbol, position.leverage);
+      if (position.leverage != null) {
+        fallback.set(position.symbol, position.leverage);
+      }
     }
     return fallback;
   }
@@ -696,6 +738,7 @@ class BybitPrivateExecutionStream {
       const seenPositionKeys = new Set<string>();
       for (const item of Array.isArray(positionsResponse?.list) ? positionsResponse.list : []) {
         if (!item || typeof item !== "object") continue;
+        this.rememberLeverageHint(this.restLeverageHints, item);
         const key = toPositionKey(item);
         seenPositionKeys.add(key);
         const normalized = normalizePositionRow(
@@ -807,6 +850,7 @@ class BybitPrivateExecutionStream {
     }
 
     for (const item of items) {
+      this.rememberLeverageHint(this.wsLeverageHints, item);
       const key = toPositionKey(item);
       const normalized = normalizePositionRow(
         item,

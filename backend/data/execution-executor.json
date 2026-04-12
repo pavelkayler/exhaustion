@@ -16,8 +16,8 @@
     "cancelActivePositionOrders": true,
     "exit": "full"
   },
-  "running": false,
-  "error": null,
-  "updatedAt": 1776012649406,
+  "running": true,
+  "error": "BTCUSDT:2:Bybit demo REST error: /v5/position/trading-stop",
+  "updatedAt": 1776014574482,
   "positionStates": {}
 }
