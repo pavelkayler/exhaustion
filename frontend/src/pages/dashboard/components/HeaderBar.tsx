@@ -1,3 +1,4 @@
+
 import { useContext } from "react";
 import { Badge, Button, Container, Nav, Navbar, Spinner } from "react-bootstrap";
 import { Link } from "react-router-dom";
@@ -24,6 +25,9 @@ type Props = {
   onPause: () => void;
   onResume: () => void;
   overlayError?: string | null;
+  canRefresh?: boolean;
+  refreshBusy?: boolean;
+  onRefresh?: () => void;
 };
 
 export function HeaderBar(props: Props) {
@@ -41,6 +45,9 @@ export function HeaderBar(props: Props) {
     onStart,
     onStop,
     overlayError,
+    canRefresh = false,
+    refreshBusy = false,
+    onRefresh,
   } = props;
   const stableStreams = useStableStreamsStatus(streams);
 
@@ -83,6 +90,11 @@ export function HeaderBar(props: Props) {
             {showRunningBot ? <Badge bg="info" text="dark">Bot: {runningBotName}</Badge> : null}
           </div>
           <div className="genesis-topbar-actions">
+            {onRefresh ? (
+              <Button size="sm" variant="outline-light" onClick={onRefresh} disabled={!canRefresh}>
+                {refreshBusy ? <Spinner animation="border" size="sm" /> : "Refresh"}
+              </Button>
+            ) : null}
             <Button size="sm" variant="success" onClick={onStart} disabled={!canStart}>{busy === "start" ? <Spinner animation="border" size="sm" /> : "Start"}</Button>
             <Button size="sm" variant="danger" onClick={onStop} disabled={!canStop}>{busy === "stop" ? <Spinner animation="border" size="sm" /> : "Stop"}</Button>
           </div>

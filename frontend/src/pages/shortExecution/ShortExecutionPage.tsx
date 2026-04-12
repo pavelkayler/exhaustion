@@ -1,3 +1,4 @@
+
 import { Col, Container, Row } from "react-bootstrap";
 import { HeaderBar } from "../dashboard/components/HeaderBar";
 import { useSessionRuntime } from "../../features/session/hooks/useSessionRuntime";
@@ -90,6 +91,9 @@ export function ShortExecutionPage() {
         onStop={() => void stop()}
         onPause={() => void pause()}
         onResume={() => void resume()}
+        canRefresh={!executionFeed.refreshing}
+        refreshBusy={executionFeed.refreshing}
+        onRefresh={() => void executionFeed.refresh()}
       />
 
       <Container fluid className="py-3 px-2">

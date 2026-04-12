@@ -87,6 +87,12 @@ type ExecutionRestClient = {
     symbol?: string;
     settleCoin?: string;
   }): Promise<{ list: Array<Record<string, unknown>> }>;
+  getOpenOrdersLinear(params?: {
+    symbol?: string;
+    settleCoin?: string;
+    limit?: number;
+    cursor?: string;
+  }): Promise<{ list: Array<Record<string, unknown>> }>;
   getInstrumentsInfoLinear(params?: { symbol?: string }): Promise<Array<Record<string, unknown>>>;
   setTradingStopLinear(params: Record<string, unknown>): Promise<unknown>;
 };
@@ -100,7 +106,6 @@ type StoredOrderRow = ExecutionOrderRow & {
   side: string | null;
   orderType: string | null;
   updatedAt: number;
-  isSynthetic?: boolean;
 };
 
 type InstrumentSpec = {
@@ -129,6 +134,12 @@ function readNumber(value: unknown): number | null {
 function readPositiveNumber(value: unknown): number | null {
   const numeric = readNumber(value);
   return numeric != null && numeric > 0 ? numeric : null;
+}
+
+function readBooleanFlag(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return normalized === "true" || normalized === "1" || normalized === "yes" || normalized === "on";
 }
 
 function inferReason(row: Record<string, unknown>): ExecutionReason {
@@ -282,33 +293,33 @@ function isActiveOrderStatus(value: unknown): boolean {
   );
 }
 
+function isDisplayableLimitOrder(row: Record<string, unknown>): boolean {
+  const orderType = String(row.orderType ?? "").trim().toUpperCase();
+  const stopOrderType = String(row.stopOrderType ?? "").trim().toUpperCase();
+  const orderFilter = String(row.orderFilter ?? "").trim().toUpperCase();
+  if (orderType !== "LIMIT") return false;
+  if (readBooleanFlag(row.reduceOnly) || readBooleanFlag(row.closeOnTrigger)) return false;
+  if (stopOrderType) return false;
+  if (orderFilter === "TPSLORDER" || orderFilter === "STOPORDER") return false;
+  return true;
+}
+
 function normalizeOrderRow(
   row: Record<string, unknown>,
   leverageFallbackBySymbol: Map<string, number | null>,
   receivedAt: number,
 ): StoredOrderRow | null {
   if (!isActiveOrderStatus(row.orderStatus)) return null;
+  if (!isDisplayableLimitOrder(row)) return null;
 
   const symbol = String(row.symbol ?? "").trim().toUpperCase();
   if (!symbol) return null;
-
-  const orderType = String(row.orderType ?? "").trim().toUpperCase();
-  const stopOrderType = String(row.stopOrderType ?? "").trim().toUpperCase();
-  const orderFilter = String(row.orderFilter ?? "").trim().toUpperCase();
-  const reduceOnly = String(row.reduceOnly ?? "").trim().toLowerCase();
-  const closeOnTrigger = String(row.closeOnTrigger ?? "").trim().toLowerCase();
-
-  if (orderType !== "LIMIT") return null;
-  if (stopOrderType.includes("TAKEPROFIT") || stopOrderType.includes("STOPLOSS")) return null;
-  if (orderFilter === "TPSLORDER") return null;
-  if (reduceOnly === "true" || reduceOnly === "1" || closeOnTrigger === "true" || closeOnTrigger === "1") return null;
 
   const key = toOrderKey(row);
   const entryPrice =
     readPositiveNumber(row.price)
     ?? readPositiveNumber(row.orderPrice)
-    ?? readPositiveNumber(row.basePrice)
-    ?? readPositiveNumber(row.triggerPrice);
+    ?? readPositiveNumber(row.basePrice);
 
   const qty =
     readPositiveNumber(row.qty)
@@ -338,7 +349,7 @@ function normalizeOrderRow(
       ?? readNumber(row.updatedTime),
     updatedAt: readRowUpdatedAt(row, receivedAt),
     side: String(row.side ?? "").trim().toUpperCase() || null,
-    orderType,
+    orderType: String(row.orderType ?? "").trim().toUpperCase() || null,
   };
 }
 
@@ -419,6 +430,7 @@ class BybitPrivateExecutionStream {
   private readonly wsPositions = new Map<string, StoredPositionRow>();
   private readonly positionDeletes = new Map<string, number>();
 
+  private readonly restOrders = new Map<string, StoredOrderRow>();
   private readonly wsOrders = new Map<string, StoredOrderRow>();
   private readonly orderDeletes = new Map<string, number>();
 
@@ -471,7 +483,7 @@ class BybitPrivateExecutionStream {
     if (this.shouldRun) return;
     this.shouldRun = true;
     this.startRestRefreshLoop();
-    void this.refreshPositionsFromRest("startup");
+    void this.refreshFromExchange("startup", { includeOrders: true });
     this.connectPrivate();
   }
 
@@ -491,9 +503,10 @@ class BybitPrivateExecutionStream {
     this.privateWs = null;
   }
 
-  async forceRefresh(reason: string): Promise<void> {
+  async forceRefresh(reason: string, options?: { includeOrders?: boolean }): Promise<PositionsSnapshot> {
     this.ensureStarted();
-    await this.refreshPositionsFromRest(reason);
+    await this.refreshFromExchange(reason, { includeOrders: options?.includeOrders ?? true });
+    return this.getSnapshot();
   }
 
   getPositionsDetailed(): StoredPositionRow[] {
@@ -537,7 +550,7 @@ class BybitPrivateExecutionStream {
         positionIdx: row.positionIdx,
         updatedAt: row.updatedAt,
       })),
-      orders: this.getDisplayOrders().map((row) => ({
+      orders: this.getMergedOrders().map((row) => ({
         key: row.key,
         symbol: row.symbol,
         reason: row.reason,
@@ -588,32 +601,36 @@ class BybitPrivateExecutionStream {
     });
   }
 
-  private getVisibleWsOrders(): StoredOrderRow[] {
+  private getMergedOrders(): StoredOrderRow[] {
     const visible = new Map<string, StoredOrderRow>();
     const keys = new Set<string>([
+      ...this.restOrders.keys(),
       ...this.wsOrders.keys(),
       ...this.orderDeletes.keys(),
     ]);
 
     for (const key of keys) {
-      const row = this.wsOrders.get(key) ?? null;
+      const restRow = this.restOrders.get(key) ?? null;
+      const wsRow = this.wsOrders.get(key) ?? null;
       const deleteTs = this.orderDeletes.get(key) ?? null;
-      if (!row) continue;
-      if (deleteTs != null && row.updatedAt <= deleteTs) continue;
-      visible.set(key, row);
+
+      const restAllowed = restRow != null && (deleteTs == null || restRow.updatedAt > deleteTs);
+      const wsAllowed = wsRow != null && (deleteTs == null || wsRow.updatedAt > deleteTs);
+
+      if (wsAllowed && (!restAllowed || wsRow!.updatedAt >= restRow!.updatedAt)) {
+        visible.set(key, wsRow!);
+        continue;
+      }
+      if (restAllowed) {
+        visible.set(key, restRow!);
+      }
     }
 
-    return Array.from(visible.values());
-  }
-
-  private getDisplayOrders(): StoredOrderRow[] {
-    return this.getVisibleWsOrders()
-      .filter((row) => row.orderType === "LIMIT")
-      .sort((left, right) => {
-        const symbolCmp = left.symbol.localeCompare(right.symbol);
-        if (symbolCmp !== 0) return symbolCmp;
-        return Number(left.placedAt ?? 0) - Number(right.placedAt ?? 0);
-      });
+    return Array.from(visible.values()).sort((left, right) => {
+      const symbolCmp = left.symbol.localeCompare(right.symbol);
+      if (symbolCmp !== 0) return symbolCmp;
+      return Number(left.placedAt ?? 0) - Number(right.placedAt ?? 0);
+    });
   }
 
   private buildLeverageFallbackBySymbol(): Map<string, number | null> {
@@ -624,7 +641,10 @@ class BybitPrivateExecutionStream {
     return fallback;
   }
 
-  private async refreshPositionsFromRest(reason: string): Promise<void> {
+  private async refreshFromExchange(
+    reason: string,
+    options?: { includeOrders?: boolean },
+  ): Promise<void> {
     if (!this.shouldRun) return;
     if (!this.restClient || !this.restClient.hasCredentials()) return;
 
@@ -634,17 +654,42 @@ class BybitPrivateExecutionStream {
         settleCoin: "USDT",
       });
 
-      const next = new Map<string, StoredPositionRow>();
+      const nextPositions = new Map<string, StoredPositionRow>();
       for (const item of Array.isArray(positionsResponse?.list) ? positionsResponse.list : []) {
         if (!item || typeof item !== "object") continue;
-        const normalized = normalizePositionRow(item, this.restPositions.get(toPositionKey(item)) ?? null, refreshedAt);
+        const normalized = normalizePositionRow(
+          item,
+          this.restPositions.get(toPositionKey(item)) ?? null,
+          refreshedAt,
+        );
         if (!normalized) continue;
-        next.set(normalized.key, normalized);
+        nextPositions.set(normalized.key, normalized);
       }
 
       this.restPositions.clear();
-      for (const [key, value] of next.entries()) {
+      for (const [key, value] of nextPositions.entries()) {
         this.restPositions.set(key, value);
+      }
+
+      let ordersCount = this.getMergedOrders().length;
+      if (options?.includeOrders) {
+        const leverageFallbackBySymbol = this.buildLeverageFallbackBySymbol();
+        const ordersResponse = await this.restClient.getOpenOrdersLinear({
+          settleCoin: "USDT",
+          limit: 50,
+        });
+        const nextOrders = new Map<string, StoredOrderRow>();
+        for (const item of Array.isArray(ordersResponse?.list) ? ordersResponse.list : []) {
+          if (!item || typeof item !== "object") continue;
+          const normalized = normalizeOrderRow(item, leverageFallbackBySymbol, refreshedAt);
+          if (!normalized) continue;
+          nextOrders.set(normalized.key, normalized);
+        }
+        this.restOrders.clear();
+        for (const [key, value] of nextOrders.entries()) {
+          this.restOrders.set(key, value);
+        }
+        ordersCount = nextOrders.size;
       }
 
       this.updatedAt = refreshedAt;
@@ -654,14 +699,14 @@ class BybitPrivateExecutionStream {
       }
 
       this.logger.info(
-        { mode: this.mode, reason, positions: next.size },
-        "private execution positions refreshed from rest",
+        { mode: this.mode, reason, positions: nextPositions.size, orders: ordersCount },
+        "private execution exchange refresh complete",
       );
       this.notifyListeners();
     } catch (error) {
       this.logger.warn(
         { mode: this.mode, reason, error: String((error as Error)?.message ?? error) },
-        "private execution rest refresh failed",
+        "private execution exchange refresh failed",
       );
     }
   }
@@ -669,7 +714,7 @@ class BybitPrivateExecutionStream {
   private startRestRefreshLoop(): void {
     if (this.restRefreshTimer) clearInterval(this.restRefreshTimer);
     this.restRefreshTimer = setInterval(() => {
-      void this.refreshPositionsFromRest("interval");
+      void this.refreshFromExchange("interval_positions", { includeOrders: false });
     }, REST_REFRESH_INTERVAL_MS);
   }
 
@@ -706,7 +751,11 @@ class BybitPrivateExecutionStream {
 
     for (const item of items) {
       const key = toPositionKey(item);
-      const normalized = normalizePositionRow(item, this.wsPositions.get(key) ?? this.restPositions.get(key) ?? null, receivedAt);
+      const normalized = normalizePositionRow(
+        item,
+        this.wsPositions.get(key) ?? this.restPositions.get(key) ?? null,
+        receivedAt,
+      );
       if (!normalized) {
         this.markPositionDeleted(key, receivedAt);
         continue;
@@ -816,7 +865,7 @@ class BybitPrivateExecutionStream {
             this.status = "connected";
             this.error = null;
             this.notifyListeners();
-            void this.refreshPositionsFromRest("subscribe_ok");
+            void this.refreshFromExchange("subscribe_ok", { includeOrders: true });
             return;
           }
           this.status = "error";
@@ -976,6 +1025,9 @@ class PrivateExecutionExecutorManager {
       this.status = "waiting_session";
       return;
     }
+    if (this.status === "waiting_session") {
+      void this.activate("runtime_ready");
+    }
   };
 
   private getActiveStream(mode: ExecutionMode): BybitPrivateExecutionStream {
@@ -994,8 +1046,7 @@ class PrivateExecutionExecutorManager {
     const stream = this.getActiveStream(settings.mode);
 
     this.status = "starting";
-    stream.ensureStarted();
-    await stream.forceRefresh(`executor_${reason}_startup_refresh`);
+    await stream.forceRefresh(`executor_${reason}_startup_refresh`, { includeOrders: true });
 
     if (settings.exit === "full") {
       await this.reconcileFullAtStart(stream, settings);
@@ -1097,6 +1148,8 @@ class PrivateExecutionExecutorManager {
 }
 
 let executorManager: PrivateExecutionExecutorManager | null = null;
+let demoExecutionStream: BybitPrivateExecutionStream | null = null;
+let realExecutionStream: BybitPrivateExecutionStream | null = null;
 
 function fallbackExecutorState(): ExecutorPublicState {
   const persisted = executorStore.getState();
@@ -1132,6 +1185,14 @@ export async function stopExecutionExecutor(): Promise<ExecutorPublicState> {
   return await executorManager.stop();
 }
 
+export async function refreshPrivateExecutionSnapshot(mode: ExecutionMode): Promise<PositionsSnapshot> {
+  const stream = mode === "real" ? realExecutionStream : demoExecutionStream;
+  if (!stream) {
+    throw new Error("execution_stream_not_ready");
+  }
+  return await stream.forceRefresh("manual_refresh", { includeOrders: true });
+}
+
 export function createPrivatePositionsWs(app: {
   addHook: (name: "onReady" | "onClose", hook: () => Promise<void>) => void;
   log: FastifyBaseLogger;
@@ -1159,6 +1220,8 @@ export function createPrivatePositionsWs(app: {
     demoRestClient,
   );
 
+  realExecutionStream = realStream;
+  demoExecutionStream = demoStream;
   executorManager = new PrivateExecutionExecutorManager(app.log, demoStream, realStream);
 
   const getStream = (mode: ExecutionMode) => (mode === "real" ? realStream : demoStream);
@@ -1232,6 +1295,8 @@ export function createPrivatePositionsWs(app: {
     clients.clear();
     executorManager?.dispose();
     executorManager = null;
+    realExecutionStream = null;
+    demoExecutionStream = null;
 
     if (wss) {
       await new Promise<void>((resolve) => wss!.close(() => resolve()));

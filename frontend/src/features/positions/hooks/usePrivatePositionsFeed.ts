@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
-import { getPrivatePositionsWsUrl } from "../../../shared/config/env";
+
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { getApiBase, getPrivatePositionsWsUrl } from "../../../shared/config/env";
 
 export type ExecutionReason = "manual" | "candidate" | "final";
 
@@ -39,17 +40,19 @@ type ExecutionFeedStatus =
   | "missing_credentials"
   | "error";
 
+type PositionsSnapshot = {
+  mode: "demo" | "real";
+  status: ExecutionFeedStatus;
+  updatedAt: number | null;
+  positions: ExecutionPositionRow[];
+  orders: ExecutionOrderRow[];
+  error?: string | null;
+};
+
 type PrivateExecutionMessage =
   | {
       type: "hello" | "execution_snapshot";
-      payload: {
-        mode: "demo" | "real";
-        status: ExecutionFeedStatus;
-        updatedAt: number | null;
-        positions: ExecutionPositionRow[];
-        orders: ExecutionOrderRow[];
-        error?: string | null;
-      };
+      payload: PositionsSnapshot;
     }
   | { type: "error"; message: string };
 
@@ -71,10 +74,57 @@ const EMPTY_STATE: FeedState = {
   error: null,
 };
 
+const apiBase = getApiBase();
+
+async function requestRefresh(mode: "demo" | "real"): Promise<PositionsSnapshot> {
+  const response = await fetch(`${apiBase}/api/execution/refresh`, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ mode }),
+  });
+  const text = await response.text();
+  const data = text.length > 0 ? JSON.parse(text) : null;
+  if (!response.ok) {
+    throw new Error(
+      String(
+        (data as { error?: unknown; message?: unknown } | null)?.message
+        ?? (data as { error?: unknown } | null)?.error
+        ?? `${response.status} ${response.statusText}`,
+      ),
+    );
+  }
+  return data as PositionsSnapshot;
+}
+
 export function usePrivatePositionsFeed(mode: "demo" | "real") {
   const [state, setState] = useState<FeedState>(EMPTY_STATE);
+  const [refreshing, setRefreshing] = useState(false);
 
   const wsUrl = useMemo(() => getPrivatePositionsWsUrl(mode), [mode]);
+
+  const applySnapshot = useCallback((payload: PositionsSnapshot) => {
+    setState({
+      conn: "CONNECTED",
+      status: payload.status,
+      positions: Array.isArray(payload.positions) ? payload.positions : [],
+      orders: Array.isArray(payload.orders) ? payload.orders : [],
+      updatedAt: payload.updatedAt ?? null,
+      error: payload.error ?? null,
+    });
+  }, []);
+
+  const refresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      const snapshot = await requestRefresh(mode);
+      applySnapshot(snapshot);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [applySnapshot, mode]);
 
   useEffect(() => {
     let active = true;
@@ -105,14 +155,7 @@ export function usePrivatePositionsFeed(mode: "demo" | "real") {
             setState((prev) => ({ ...prev, error: msg.message }));
             return;
           }
-          setState({
-            conn: "CONNECTED",
-            status: msg.payload.status,
-            positions: Array.isArray(msg.payload.positions) ? msg.payload.positions : [],
-            orders: Array.isArray(msg.payload.orders) ? msg.payload.orders : [],
-            updatedAt: msg.payload.updatedAt ?? null,
-            error: msg.payload.error ?? null,
-          });
+          applySnapshot(msg.payload);
         } catch (error) {
           setState((prev) => ({
             ...prev,
@@ -147,7 +190,7 @@ export function usePrivatePositionsFeed(mode: "demo" | "real") {
         return;
       }
     };
-  }, [wsUrl]);
+  }, [applySnapshot, wsUrl]);
 
-  return { ...state, wsUrl };
+  return { ...state, wsUrl, refreshing, refresh };
 }

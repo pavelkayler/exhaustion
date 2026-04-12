@@ -1,3 +1,4 @@
+
 import fs from "node:fs";
 import type { FastifyInstance } from "fastify";
 import { runtime } from "../runtime/runtime.js";
@@ -9,6 +10,7 @@ import {
 } from "./wsHub.js";
 import {
   getExecutionExecutorState,
+  refreshPrivateExecutionSnapshot,
   startExecutionExecutor,
   stopExecutionExecutor,
   updateExecutionExecutorSettings,
@@ -91,6 +93,17 @@ export function registerHttpRoutes(app: FastifyInstance) {
 
   app.post("/api/executor/stop", async () => {
     return await stopExecutionExecutor();
+  });
+
+  app.post("/api/execution/refresh", async (req, reply) => {
+    try {
+      const body = ((req.body ?? {}) as Record<string, unknown>) ?? {};
+      const mode = String(body.mode ?? "").trim().toLowerCase() === "real" ? "real" : "demo";
+      return await refreshPrivateExecutionSnapshot(mode);
+    } catch (error) {
+      reply.code(400);
+      return { error: String((error as Error)?.message ?? error) };
+    }
   });
 
   app.get("/api/process/status", async () => {

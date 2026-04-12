@@ -4,7 +4,7 @@
     "maxUsdt": 100,
     "leverage": 10,
     "tpPct": 3,
-    "slPct": 10,
+    "slPct": 2,
     "firstOrderOffsetPct": 0.6,
     "gridOrdersCount": 2,
     "gridStepPct": 1.2,
@@ -16,8 +16,8 @@
     "cancelActivePositionOrders": true,
     "exit": "full"
   },
-  "running": true,
-  "error": "Bybit demo REST error: /v5/position/trading-stop",
-  "updatedAt": 1776005389602,
+  "running": false,
+  "error": null,
+  "updatedAt": 1776006916695,
   "positionStates": {}
 }
