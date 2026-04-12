@@ -13,17 +13,9 @@ import { ExecutionHeaderCard } from "./components/ExecutionHeaderCard";
 import { ExecutionPositionsCard } from "./components/ExecutionPositionsCard";
 import { ExecutionOrdersCard } from "./components/ExecutionOrdersCard";
 import { ExecutionSettingsCard } from "./components/ExecutionSettingsCard";
-import { useExecutionMarketRefresh } from "./hooks/useExecutionMarketRefresh";
 
 export function ShortExecutionPage() {
-  const {
-    conn,
-    lastServerTime,
-    wsUrl,
-    streams,
-    rows,
-    requestRowsRefresh,
-  } = useWsFeed();
+  const { conn, lastServerTime, wsUrl, streams } = useWsFeed();
   const {
     status,
     busy,
@@ -43,12 +35,6 @@ export function ShortExecutionPage() {
   );
 
   const executionFeed = usePrivatePositionsFeed(settings.mode);
-
-  useExecutionMarketRefresh({
-    enabled: conn === "CONNECTED",
-    intervalMs: 5_000,
-    requestRowsRefresh,
-  });
 
   const updateNumber = (key: NumericFieldKey, value: string) => {
     const numeric = Number(value);
@@ -98,12 +84,10 @@ export function ShortExecutionPage() {
         <Row className="g-3">
           <Col xs={12}>
             <ExecutionPositionsCard
-              rows={rows}
               positions={executionFeed.positions}
               status={executionFeed.status}
               error={executionFeed.error}
               updatedAt={executionFeed.updatedAt}
-              marketUpdatedAt={lastServerTime}
             />
           </Col>
 

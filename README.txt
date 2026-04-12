@@ -1,17 +1,21 @@
 Что исправлено
 
-Причина бага:
-- execution-таблица брала market data из `rows`
-- но пересчёт был завязан только на ссылку `rows`
-- когда backend обновлял market state без новой ссылки на массив rows, `PnL` и `Value` не пересчитывались
-- timestamp в header тоже жил отдельно от market refresh и поэтому не обновлялся вместе с PnL
+Корень бага:
+- `ExecutionPositionsCard` поверх backend execution snapshot заново пересчитывал `Value` и `PnL`
+  из `useWsFeed().rows`
+- из-за этого UI зависел не от живого execution-feed, а от того, когда обновятся именно `rows`
+- поэтому:
+  - timestamp мог обновляться
+  - а `PnL` оставался старым
+  - после reload мог показываться старый/неверный `PnL`
 
-Что изменено:
-- `ShortExecutionPage.tsx` теперь передаёт в `ExecutionPositionsCard` ещё и `lastServerTime` как `marketUpdatedAt`
-- `ExecutionPositionsCard.tsx`:
-  - считает `effectiveUpdatedAt = max(updatedAt, marketUpdatedAt)`
-  - использует `marketUpdatedAt` в зависимостях `useMemo`
-  - поэтому пересчёт `PnL`/`Value` и надпись `updated` синхронизируются с каждым market refresh
+Что сделано:
+- `ShortExecutionPage.tsx` больше не тянет `rows` и не передаёт их в positions card
+- `ExecutionPositionsCard.tsx` теперь использует backend execution snapshot как source of truth:
+  - `row.value`
+  - `row.pnl`
+  - `updatedAt`
+- frontend больше не перетирает значения своим локальным пересчётом
 
 Что заменить:
 - frontend/src/pages/shortExecution/ShortExecutionPage.tsx
