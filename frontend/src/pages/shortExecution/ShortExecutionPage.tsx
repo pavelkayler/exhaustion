@@ -13,9 +13,10 @@ import { ExecutionHeaderCard } from "./components/ExecutionHeaderCard";
 import { ExecutionPositionsCard } from "./components/ExecutionPositionsCard";
 import { ExecutionOrdersCard } from "./components/ExecutionOrdersCard";
 import { ExecutionSettingsCard } from "./components/ExecutionSettingsCard";
+import { useExecutionMarketRefresh } from "./hooks/useExecutionMarketRefresh";
 
 export function ShortExecutionPage() {
-  const { conn, lastServerTime, wsUrl, streams, rows } = useWsFeed();
+  const { conn, lastServerTime, wsUrl, streams, rows, requestRowsRefresh } = useWsFeed();
   const {
     status,
     busy,
@@ -35,6 +36,12 @@ export function ShortExecutionPage() {
   );
 
   const executionFeed = usePrivatePositionsFeed(settings.mode);
+
+  useExecutionMarketRefresh({
+    enabled: conn === "CONNECTED",
+    intervalMs: 5_000,
+    requestRowsRefresh,
+  });
 
   const updateNumber = (key: NumericFieldKey, value: string) => {
     const numeric = Number(value);
