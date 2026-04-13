@@ -1368,6 +1368,16 @@ class PrivateExecutionExecutorManager {
     return mode === "real" ? this.realStream : this.demoStream;
   }
 
+  private logSignalStep(
+    step: "signal_seen" | "signal_skipped_reason" | "orders_cancelled" | "grid_submitted",
+    payload: Record<string, unknown>,
+  ): void {
+    this.logger.info(
+      { step, ...payload },
+      "private execution executor signal step",
+    );
+  }
+
   private getCooldownKey(mode: ExecutionMode, symbol: string): string {
     return `${mode}:${symbol}`;
   }
@@ -1457,35 +1467,130 @@ class PrivateExecutionExecutorManager {
 
     const payload = (source.payload && typeof source.payload === "object" ? source.payload : {}) as Record<string, unknown>;
     const snapshot = (payload.snapshot && typeof payload.snapshot === "object" ? payload.snapshot : {}) as Record<string, unknown>;
-    const nextState = normalizeSignalState(payload.nextState ?? snapshot.state);
-    if (!nextState || nextState === "SUPPRESSED") return;
-
-    const advisoryVerdict = normalizeSignalState(snapshot.advisoryVerdict ?? ((snapshot.metrics && typeof snapshot.metrics === "object") ? (snapshot.metrics as Record<string, unknown>).advisoryVerdict : null));
-    if (advisoryVerdict !== "TRADEABLE") return;
-
-    const reason = resolveSignalExecutionReason(nextState);
-    if (!reason) return;
-    if (reason === "candidate" && !settings.takeCandidateSignalsInLiveExecution) return;
-    if (reason === "final" && !settings.takeFinalSignals) return;
-
     const symbol = String(source.symbol ?? snapshot.symbol ?? "").trim().toUpperCase();
-    if (!symbol) return;
+    const nextState = normalizeSignalState(payload.nextState ?? snapshot.state);
+    const advisoryVerdict = normalizeSignalState(snapshot.advisoryVerdict ?? ((snapshot.metrics && typeof snapshot.metrics === "object") ? (snapshot.metrics as Record<string, unknown>).advisoryVerdict : null));
+    const transitionReason = String(payload.transitionReason ?? snapshot.summaryReason ?? "").trim() || null;
+    const reason = resolveSignalExecutionReason(nextState);
+    this.logSignalStep("signal_seen", {
+      mode: settings.mode,
+      symbol: symbol || null,
+      state: nextState || null,
+      reason,
+      advisoryVerdict: advisoryVerdict || null,
+      transitionReason,
+    });
+
+    if (!symbol) {
+      this.logSignalStep("signal_skipped_reason", {
+        mode: settings.mode,
+        symbol: null,
+        state: nextState || null,
+        reason,
+        advisoryVerdict: advisoryVerdict || null,
+        transitionReason,
+        skipReason: "missing_symbol",
+      });
+      return;
+    }
+    if (!nextState) {
+      this.logSignalStep("signal_skipped_reason", {
+        mode: settings.mode,
+        symbol,
+        state: null,
+        reason: null,
+        advisoryVerdict: advisoryVerdict || null,
+        transitionReason,
+        skipReason: "missing_state",
+      });
+      return;
+    }
+    if (nextState === "SUPPRESSED") {
+      this.logSignalStep("signal_skipped_reason", {
+        mode: settings.mode,
+        symbol,
+        state: nextState,
+        reason: null,
+        advisoryVerdict: advisoryVerdict || null,
+        transitionReason,
+        skipReason: "suppressed_state",
+      });
+      return;
+    }
+    if (!reason) {
+      this.logSignalStep("signal_skipped_reason", {
+        mode: settings.mode,
+        symbol,
+        state: nextState,
+        reason: null,
+        advisoryVerdict: advisoryVerdict || null,
+        transitionReason,
+        skipReason: "unsupported_state",
+      });
+      return;
+    }
+    if (reason === "candidate" && !settings.takeCandidateSignalsInLiveExecution) {
+      this.logSignalStep("signal_skipped_reason", {
+        mode: settings.mode,
+        symbol,
+        state: nextState,
+        reason,
+        advisoryVerdict: advisoryVerdict || null,
+        transitionReason,
+        skipReason: "candidate_signals_disabled",
+      });
+      return;
+    }
+    if (reason === "final" && !settings.takeFinalSignals) {
+      this.logSignalStep("signal_skipped_reason", {
+        mode: settings.mode,
+        symbol,
+        state: nextState,
+        reason,
+        advisoryVerdict: advisoryVerdict || null,
+        transitionReason,
+        skipReason: "final_signals_disabled",
+      });
+      return;
+    }
+    if (reason === "final" && advisoryVerdict !== "TRADEABLE") {
+      this.logSignalStep("signal_skipped_reason", {
+        mode: settings.mode,
+        symbol,
+        state: nextState,
+        reason,
+        advisoryVerdict: advisoryVerdict || null,
+        transitionReason,
+        skipReason: "final_not_tradeable",
+      });
+      return;
+    }
 
     const referencePrice = resolveSignalReferencePrice(payload);
     if (!(referencePrice && referencePrice > 0)) {
-      this.logger.warn(
-        { mode: settings.mode, symbol, nextState },
-        "private execution executor skipped signal: missing reference price",
-      );
+      this.logSignalStep("signal_skipped_reason", {
+        mode: settings.mode,
+        symbol,
+        state: nextState,
+        reason,
+        advisoryVerdict: advisoryVerdict || null,
+        transitionReason,
+        skipReason: "missing_reference_price",
+      });
       return;
     }
 
     const signalKey = `${settings.mode}:${symbol}`;
     if (this.signalInFlightByModeSymbol.has(signalKey)) {
-      this.logger.info(
-        { mode: settings.mode, symbol, nextState },
-        "private execution executor skipped signal: processing already in flight",
-      );
+      this.logSignalStep("signal_skipped_reason", {
+        mode: settings.mode,
+        symbol,
+        state: nextState,
+        reason,
+        advisoryVerdict: advisoryVerdict || null,
+        transitionReason,
+        skipReason: "processing_already_in_flight",
+      });
       return;
     }
 
@@ -1497,7 +1602,8 @@ class PrivateExecutionExecutorManager {
         reason,
         state: nextState,
         referencePrice,
-        transitionReason: String(payload.transitionReason ?? snapshot.summaryReason ?? "").trim() || null,
+        advisoryVerdict: advisoryVerdict || null,
+        transitionReason,
       });
     } finally {
       this.signalInFlightByModeSymbol.delete(signalKey);
@@ -1510,6 +1616,7 @@ class PrivateExecutionExecutorManager {
     reason: ExecutionReason;
     state: string;
     referencePrice: number;
+    advisoryVerdict: string | null;
     transitionReason: string | null;
   }): Promise<void> {
     const stream = this.getActiveStream(args.settings.mode);
@@ -1520,35 +1627,56 @@ class PrivateExecutionExecutorManager {
 
     const hasOpenPosition = stream.getPositionsDetailed().some((row) => row.symbol === args.symbol && Number(row.size ?? 0) > 0);
     if (hasOpenPosition) {
-      this.logger.info(
-        { mode: args.settings.mode, symbol: args.symbol, state: args.state },
-        "private execution executor skipped signal: position already open",
-      );
-      return;
-    }
-
-    if (this.isCooldownActive(args.settings.mode, args.symbol, args.settings)) {
-      this.logger.info(
-        { mode: args.settings.mode, symbol: args.symbol, state: args.state, cooldownMin: args.settings.cooldownMin },
-        "private execution executor skipped signal: cooldown active",
-      );
-      return;
-    }
-
-    const canceled = await this.cancelExecutorOrdersForSymbol(stream, restClient, args.symbol, "replace_on_signal");
-    await stream.forceRefresh(`signal_${args.symbol}_pre_place_refresh`, { includeOrders: true });
-    await this.placeSignalEntryGrid(stream, restClient, args);
-    this.logger.info(
-      {
+      this.logSignalStep("signal_skipped_reason", {
         mode: args.settings.mode,
         symbol: args.symbol,
         state: args.state,
         reason: args.reason,
+        advisoryVerdict: args.advisoryVerdict,
         transitionReason: args.transitionReason,
-        canceledOrders: canceled,
-      },
-      "private execution executor signal grid placed",
-    );
+        skipReason: "position_already_open",
+      });
+      return;
+    }
+
+    if (this.isCooldownActive(args.settings.mode, args.symbol, args.settings)) {
+      this.logSignalStep("signal_skipped_reason", {
+        mode: args.settings.mode,
+        symbol: args.symbol,
+        state: args.state,
+        reason: args.reason,
+        advisoryVerdict: args.advisoryVerdict,
+        transitionReason: args.transitionReason,
+        cooldownMin: args.settings.cooldownMin,
+        skipReason: "cooldown_active",
+      });
+      return;
+    }
+
+    const canceled = await this.cancelExecutorOrdersForSymbol(stream, restClient, args.symbol, "replace_on_signal");
+    this.logSignalStep("orders_cancelled", {
+      mode: args.settings.mode,
+      symbol: args.symbol,
+      state: args.state,
+      reason: args.reason,
+      advisoryVerdict: args.advisoryVerdict,
+      transitionReason: args.transitionReason,
+      canceledOrders: canceled,
+    });
+    await stream.forceRefresh(`signal_${args.symbol}_pre_place_refresh`, { includeOrders: true });
+    const grid = await this.placeSignalEntryGrid(stream, restClient, args);
+    await stream.forceRefresh(`signal_${args.symbol}_post_place_refresh`, { includeOrders: true });
+    this.logSignalStep("grid_submitted", {
+      mode: args.settings.mode,
+      symbol: args.symbol,
+      state: args.state,
+      reason: args.reason,
+      advisoryVerdict: args.advisoryVerdict,
+      transitionReason: args.transitionReason,
+      ordersCount: grid.ordersCount,
+      marginPerOrder: grid.marginPerOrder,
+      orderLinkIds: grid.orderLinkIds,
+    });
   }
 
   private async cancelExecutorOrdersForSymbol(
@@ -1616,9 +1744,10 @@ class PrivateExecutionExecutorManager {
       reason: ExecutionReason;
       state: string;
       referencePrice: number;
+      advisoryVerdict: string | null;
       transitionReason: string | null;
     },
-  ): Promise<void> {
+  ): Promise<{ ordersCount: number; marginPerOrder: number; orderLinkIds: string[] }> {
     const instrument = await this.getInstrumentSpec(args.settings.mode, restClient, args.symbol);
     const ordersCount = Math.max(1, Math.floor(Number(args.settings.gridOrdersCount) || 0));
     const marginPerOrder = args.settings.maxUsdt / ordersCount;
@@ -1687,6 +1816,12 @@ class PrivateExecutionExecutorManager {
       }
       throw new Error(message);
     }
+
+    return {
+      ordersCount,
+      marginPerOrder,
+      orderLinkIds: [...createdOrderLinkIds],
+    };
   }
 
   private async reconcileFullAtStart(

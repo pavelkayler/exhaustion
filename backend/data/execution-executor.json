@@ -1,23 +1,23 @@
 {
   "settings": {
     "mode": "demo",
-    "maxUsdt": 10,
+    "maxUsdt": 100,
     "leverage": 10,
-    "tpPct": 3,
-    "slPct": 6,
-    "firstOrderOffsetPct": 0.6,
-    "gridOrdersCount": 2,
-    "gridStepPct": 1.2,
-    "orderAliveMin": 2,
-    "cooldownMin": 20,
+    "tpPct": 1,
+    "slPct": 0.5,
+    "firstOrderOffsetPct": 3,
+    "gridOrdersCount": 1,
+    "gridStepPct": 0,
+    "orderAliveMin": 15,
+    "cooldownMin": 5,
     "trackCandidateSignalsForResearch": false,
     "takeCandidateSignalsInLiveExecution": true,
     "takeFinalSignals": true,
-    "cancelActivePositionOrders": true,
-    "exit": "trailing"
+    "cancelActivePositionOrders": false,
+    "exit": "full"
   },
   "running": true,
   "error": null,
-  "updatedAt": 1776034399896,
+  "updatedAt": 1776107002806,
   "positionStates": {}
 }
