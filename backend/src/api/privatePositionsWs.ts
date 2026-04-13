@@ -1146,8 +1146,10 @@ class PrivateExecutionExecutorManager {
   };
   private readonly lastClosedAtByModeSymbol = new Map<string, number>();
   private readonly signalInFlightByModeSymbol = new Set<string>();
+  private fullReconcileTimer: NodeJS.Timeout | null = null;
   private trailingReconcileTimer: NodeJS.Timeout | null = null;
   private orderMaintenanceTimer: NodeJS.Timeout | null = null;
+  private fullReconcileInFlight = false;
   private trailingReconcileInFlight = false;
 
   constructor(
@@ -1260,7 +1262,7 @@ class PrivateExecutionExecutorManager {
       return;
     }
     this.ensureOrderMaintenanceTimer();
-    this.scheduleTrailingReconcile("runtime_state", TRAILING_RECONCILE_DEBOUNCE_MS);
+    this.scheduleProtectionReconcile("runtime_state", TRAILING_RECONCILE_DEBOUNCE_MS);
   };
 
   private readonly handleRuntimeEvent = (event: unknown) => {
@@ -1279,14 +1281,22 @@ class PrivateExecutionExecutorManager {
     if (!isRuntimeSessionActive()) return;
     if (!settings || settings.mode !== mode) return;
     this.ensureOrderMaintenanceTimer();
-    this.scheduleTrailingReconcile("stream_update", TRAILING_RECONCILE_DEBOUNCE_MS);
+    this.scheduleProtectionReconcile("stream_update", TRAILING_RECONCILE_DEBOUNCE_MS);
   }
 
   private clearRuntimeTimers(): void {
+    this.clearFullReconcileTimer();
     this.clearTrailingReconcileTimer();
     if (this.orderMaintenanceTimer) {
       clearInterval(this.orderMaintenanceTimer);
       this.orderMaintenanceTimer = null;
+    }
+  }
+
+  private clearFullReconcileTimer(): void {
+    if (this.fullReconcileTimer) {
+      clearTimeout(this.fullReconcileTimer);
+      this.fullReconcileTimer = null;
     }
   }
 
@@ -1313,15 +1323,37 @@ class PrivateExecutionExecutorManager {
       if (settings.cancelActivePositionOrders) {
         await this.cancelStaleOrdersIfNeeded("order_alive_tick");
       }
-      if (settings.exit === "trailing") {
-        this.scheduleTrailingReconcile("order_maintenance", 0);
-      }
+      this.scheduleProtectionReconcile("order_maintenance", 0);
     } catch (error) {
       this.logger.error(
         { mode: settings.mode, error: String((error as Error)?.message ?? error) },
         "private execution executor order maintenance failed",
       );
     }
+  }
+
+  private scheduleProtectionReconcile(reason: string, delayMs: number): void {
+    const settings = this.activeSettings;
+    if (!executorStore.getState().running) return;
+    if (!settings) return;
+    if (settings.exit === "full") {
+      this.scheduleFullReconcile(reason, delayMs);
+      return;
+    }
+    if (settings.exit === "trailing") {
+      this.scheduleTrailingReconcile(reason, delayMs);
+    }
+  }
+
+  private scheduleFullReconcile(reason: string, delayMs: number): void {
+    const settings = this.activeSettings;
+    if (!executorStore.getState().running) return;
+    if (!settings || settings.exit !== "full") return;
+    this.clearFullReconcileTimer();
+    this.fullReconcileTimer = setTimeout(() => {
+      this.fullReconcileTimer = null;
+      void this.runFullReconcileLoop(reason);
+    }, Math.max(0, delayMs));
   }
 
   private scheduleTrailingReconcile(reason: string, delayMs: number): void {
@@ -1333,6 +1365,35 @@ class PrivateExecutionExecutorManager {
       this.trailingReconcileTimer = null;
       void this.runTrailingReconcileLoop(reason);
     }, Math.max(0, delayMs));
+  }
+
+  private async runFullReconcileLoop(reason: string): Promise<void> {
+    const settings = this.activeSettings;
+    if (!executorStore.getState().running) return;
+    if (!settings || settings.exit !== "full") return;
+    if (!isRuntimeSessionActive()) return;
+
+    if (this.fullReconcileInFlight) {
+      this.scheduleFullReconcile(`${reason}_queued`, TRAILING_RECONCILE_RETRY_MS);
+      return;
+    }
+
+    this.fullReconcileInFlight = true;
+    try {
+      const stream = this.getActiveStream(settings.mode);
+      const summary = await this.reconcileFullPositions(stream, settings, reason);
+      if (summary.pending > 0) {
+        this.scheduleFullReconcile(`${reason}_retry`, TRAILING_RECONCILE_RETRY_MS);
+      }
+    } catch (error) {
+      this.logger.error(
+        { mode: settings.mode, reason, error: String((error as Error)?.message ?? error) },
+        "private execution executor full reconcile loop failed",
+      );
+      this.scheduleFullReconcile(`${reason}_retry_error`, TRAILING_RECONCILE_RETRY_MS);
+    } finally {
+      this.fullReconcileInFlight = false;
+    }
   }
 
   private async runTrailingReconcileLoop(reason: string): Promise<void> {
@@ -1436,7 +1497,10 @@ class PrivateExecutionExecutorManager {
     this.syncOpenSymbols(settings.mode);
 
     if (settings.exit === "full") {
-      await this.reconcileFullAtStart(stream, settings);
+      const summary = await this.reconcileFullPositions(stream, settings, `executor_${reason}_full_startup`);
+      if (summary.pending > 0) {
+        this.scheduleFullReconcile(`${reason}_startup_retry`, TRAILING_RECONCILE_RETRY_MS);
+      }
     }
 
     if (settings.exit === "trailing") {
@@ -1824,20 +1888,28 @@ class PrivateExecutionExecutorManager {
     };
   }
 
-  private async reconcileFullAtStart(
+  private async reconcileFullPositions(
     stream: BybitPrivateExecutionStream,
     settings: ExecutorSettings,
-  ): Promise<void> {
+    reason: string,
+  ): Promise<TrailingReconcileSummary> {
     const restClient = stream.getRestClient();
     if (!restClient || !restClient.hasCredentials()) {
       throw new Error("missing_credentials");
     }
 
     const positions = stream.getPositionsDetailed().filter((row) => Number(row.size ?? 0) > 0);
-    const errors: string[] = [];
+    let attempted = 0;
+    let failed = 0;
+    let pending = 0;
 
     for (const position of positions) {
       if (!Number.isFinite(position.entryPrice as number) || Number(position.entryPrice) <= 0) {
+        pending += 1;
+        this.logger.warn(
+          { mode: settings.mode, reason, symbol: position.symbol, key: position.key, entryPrice: position.entryPrice },
+          "private execution executor full reconcile postponed: invalid entry price",
+        );
         continue;
       }
 
@@ -1853,13 +1925,24 @@ class PrivateExecutionExecutorManager {
           instrument.tickSize,
         );
 
-        const needsTrailingClear = (position.trailingStop ?? null) != null;
-        const needsTpReset = (position.tp ?? null) != null && !sameWithinStep(position.tp, targetTp, instrument.tickSize);
-        const needsSlReset = (position.sl ?? null) != null && !sameWithinStep(position.sl, targetSl, instrument.tickSize);
+        const trailingPresent = (position.trailingStop ?? null) != null;
+        const tpMatches = sameWithinStep(position.tp ?? null, targetTp, instrument.tickSize);
+        const slMatches = sameWithinStep(position.sl ?? null, targetSl, instrument.tickSize);
+        const needsTrailingClear = trailingPresent;
+        const needsTpReset = (position.tp ?? null) != null && !tpMatches;
+        const needsSlReset = (position.sl ?? null) != null && !slMatches;
+        const needsTpSet = !tpMatches;
+        const needsSlSet = !slMatches;
+
+        if (!needsTrailingClear && !needsTpReset && !needsSlReset && !needsTpSet && !needsSlSet) {
+          continue;
+        }
+
+        attempted += 1;
 
         if (needsTrailingClear) {
           this.logger.info(
-            { symbol: position.symbol, positionIdx, patch: { trailingStop: "0" } },
+            { mode: settings.mode, reason, symbol: position.symbol, positionIdx, patch: { trailingStop: "0" } },
             "private execution executor apply trading stop patch",
           );
           await restClient.setTradingStopLinear({
@@ -1871,7 +1954,7 @@ class PrivateExecutionExecutorManager {
 
         if (needsTpReset) {
           this.logger.info(
-            { symbol: position.symbol, positionIdx, patch: { tpslMode: "Full", takeProfit: "0" } },
+            { mode: settings.mode, reason, symbol: position.symbol, positionIdx, patch: { tpslMode: "Full", takeProfit: "0" } },
             "private execution executor apply trading stop patch",
           );
           await restClient.setTradingStopLinear({
@@ -1884,7 +1967,7 @@ class PrivateExecutionExecutorManager {
 
         if (needsSlReset) {
           this.logger.info(
-            { symbol: position.symbol, positionIdx, patch: { tpslMode: "Full", stopLoss: "0" } },
+            { mode: settings.mode, reason, symbol: position.symbol, positionIdx, patch: { tpslMode: "Full", stopLoss: "0" } },
             "private execution executor apply trading stop patch",
           );
           await restClient.setTradingStopLinear({
@@ -1895,29 +1978,33 @@ class PrivateExecutionExecutorManager {
           });
         }
 
-        this.logger.info(
-          { symbol: position.symbol, positionIdx, patch: { tpslMode: "Full", takeProfit: formatForApi(targetTp), tpTriggerBy: "LastPrice" } },
-          "private execution executor apply trading stop patch",
-        );
-        await restClient.setTradingStopLinear({
-          symbol: position.symbol,
-          positionIdx,
-          tpslMode: "Full",
-          takeProfit: formatForApi(targetTp),
-          tpTriggerBy: "LastPrice",
-        });
+        if (needsTpSet) {
+          this.logger.info(
+            { mode: settings.mode, reason, symbol: position.symbol, positionIdx, patch: { tpslMode: "Full", takeProfit: formatForApi(targetTp), tpTriggerBy: "LastPrice" } },
+            "private execution executor apply trading stop patch",
+          );
+          await restClient.setTradingStopLinear({
+            symbol: position.symbol,
+            positionIdx,
+            tpslMode: "Full",
+            takeProfit: formatForApi(targetTp),
+            tpTriggerBy: "LastPrice",
+          });
+        }
 
-        this.logger.info(
-          { symbol: position.symbol, positionIdx, patch: { tpslMode: "Full", stopLoss: formatForApi(targetSl), slTriggerBy: "LastPrice" } },
-          "private execution executor apply trading stop patch",
-        );
-        await restClient.setTradingStopLinear({
-          symbol: position.symbol,
-          positionIdx,
-          tpslMode: "Full",
-          stopLoss: formatForApi(targetSl),
-          slTriggerBy: "LastPrice",
-        });
+        if (needsSlSet) {
+          this.logger.info(
+            { mode: settings.mode, reason, symbol: position.symbol, positionIdx, patch: { tpslMode: "Full", stopLoss: formatForApi(targetSl), slTriggerBy: "LastPrice" } },
+            "private execution executor apply trading stop patch",
+          );
+          await restClient.setTradingStopLinear({
+            symbol: position.symbol,
+            positionIdx,
+            tpslMode: "Full",
+            stopLoss: formatForApi(targetSl),
+            slTriggerBy: "LastPrice",
+          });
+        }
 
         stream.applyOptimisticProtection(position.key, {
           tp: targetTp,
@@ -1925,26 +2012,48 @@ class PrivateExecutionExecutorManager {
           trailingStop: null,
         });
       } catch (error) {
+        failed += 1;
         const message = String((error as Error)?.message ?? error);
-        errors.push(`${position.symbol}:${resolvePositionIdx(position)}:${message}`);
         this.logger.error(
           {
+            mode: settings.mode,
+            reason,
             symbol: position.symbol,
             side: position.side,
             positionIdx: resolvePositionIdx(position),
             entryPrice: position.entryPrice,
             tp: position.tp,
             sl: position.sl,
+            trailingStop: position.trailingStop,
             error: message,
           },
-          "private execution executor position reconcile failed",
+          "private execution executor full reconcile failed",
         );
       }
     }
 
-    if (errors.length > 0 && errors.length === positions.length) {
-      throw new Error(errors.join(" | "));
+    pending += failed;
+
+    if (attempted > 0 || pending > 0) {
+      this.logger.info(
+        {
+          mode: settings.mode,
+          reason,
+          total: positions.length,
+          attempted,
+          failed,
+          pending,
+        },
+        "private execution executor full reconcile summary",
+      );
     }
+
+    return {
+      total: positions.length,
+      attempted,
+      failed,
+      pending,
+    };
   }
 
   private async reconcileTrailingPositions(
