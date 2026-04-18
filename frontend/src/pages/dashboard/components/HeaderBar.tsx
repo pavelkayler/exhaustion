@@ -25,6 +25,9 @@ type Props = {
   onPause: () => void;
   onResume: () => void;
   overlayError?: string | null;
+  canReset?: boolean;
+  resetBusy?: boolean;
+  onReset?: () => void;
   canRefresh?: boolean;
   refreshBusy?: boolean;
   onRefresh?: () => void;
@@ -45,6 +48,9 @@ export function HeaderBar(props: Props) {
     onStart,
     onStop,
     overlayError,
+    canReset = false,
+    resetBusy = false,
+    onReset,
     canRefresh = false,
     refreshBusy = false,
     onRefresh,
@@ -70,6 +76,17 @@ export function HeaderBar(props: Props) {
       ) : null}
       <Container fluid className="genesis-topbar-layout">
         <div className="genesis-topbar-main">
+          {onReset ? (
+            <Button
+              size="sm"
+              variant="outline-secondary"
+              className="genesis-topbar-reset-btn"
+              onClick={onReset}
+              disabled={!canReset}
+            >
+              {resetBusy ? <Spinner animation="border" size="sm" /> : "Reset"}
+            </Button>
+          ) : null}
           <Navbar.Brand>{appName}</Navbar.Brand>
           <Nav className="genesis-topbar-nav">
             <Nav.Link as={Link} to="/" onMouseEnter={() => preloadNavRoute("/")} onFocus={() => preloadNavRoute("/")}>Dashboard</Nav.Link>

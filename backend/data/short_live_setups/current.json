@@ -1,4 +1,85 @@
 {
-  "updatedAtMs": 1776472356995,
-  "records": []
+  "updatedAtMs": 1776506099829,
+  "records": [
+    {
+      "id": "live:setup:SIRENUSDT:1776506052788",
+      "runId": "live",
+      "signalId": "live:SIRENUSDT:1776506052788",
+      "symbol": "SIRENUSDT",
+      "sourceSignalState": "SUPPRESSED",
+      "setupState": "shadow",
+      "tradabilityStatus": "shadow",
+      "setupType": "shadow",
+      "setupStyle": "standard",
+      "entryMode": "limit_on_retest",
+      "entryZoneLow": 0.7475071999999999,
+      "entryZoneHigh": 0.7536765,
+      "entryPriceMid": 0.75059185,
+      "setupReferencePrice": 0.739065,
+      "invalidationPrice": null,
+      "invalidationPctFromReference": 0.02526198642879855,
+      "invalidationType": "structural_high",
+      "target1Price": 0.7302981,
+      "target2Price": 0.71649835,
+      "rrToTp1": 2.840909090909082,
+      "rrToTp2": 4.772727272727258,
+      "expectedRr": 4.772727272727258,
+      "setupQualityScore": 5,
+      "confidence": 0.9994222222222222,
+      "reasons": [
+        "candidate:price_impulse",
+        "candidate:activity_burst",
+        "candidate:universe_rank",
+        "candidate:liquidity_floor",
+        "entry_mode:limit_on_retest",
+        "setup_state:shadow",
+        "orderbook_modifier:2.38"
+      ],
+      "setupRationale": [
+        "Entry geometry starts from exhaustion structure in limit_on_retest mode.",
+        "Primary invalidation stays above structural setup high.",
+        "Targets anchor to local pullback structure with deeper pre-pump return as TP2."
+      ],
+      "whyTradableSummary": "Suppressed setup kept as a shadow short idea for review, not for action.",
+      "lastRevisionReason": "created",
+      "isWeakened": false,
+      "degradationReason": null,
+      "confidenceBreakdown": {
+        "signalContext": 0.9994222222222222,
+        "entryQuality": 0.85,
+        "invalidationQuality": 0.82,
+        "targetQuality": 0.95,
+        "rrQuality": 1,
+        "decayPenalty": 0
+      },
+      "anchors": {
+        "signalHigh": 0.7553,
+        "rejectionCandleHigh": null,
+        "finalTriggerCandleHigh": null,
+        "setupHigh": 0.7553,
+        "signalBarStartMs": null
+      },
+      "isTradableNow": false,
+      "supersedesSetupId": null,
+      "supersededBySetupId": null,
+      "setupExpiryTs": 1776506232788,
+      "revision": 1,
+      "setupVersion": "short-setup-v1.1",
+      "setupRulesVersion": "short-setup-rules-v1.1",
+      "createdAtMs": 1776506052788,
+      "updatedAtMs": 1776506052788,
+      "outcomeId": null,
+      "liveSetupId": "live:setup:SIRENUSDT:1776506052788",
+      "current": true,
+      "restoredFromDisk": false,
+      "lastSignalState": "SUPPRESSED",
+      "latestRevisionSummary": {
+        "revision": 1,
+        "ts": 1776506052788,
+        "reasonCode": "created",
+        "changedFields": [],
+        "note": "Suppressed setup kept as a shadow short idea for review, not for action."
+      }
+    }
+  ]
 }

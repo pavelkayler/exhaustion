@@ -1,7 +1,0 @@
-{"level":30,"time":1776034369833,"pid":10652,"bootSessionId":"1776034369568-10652-aa922a29","msg":"wsHub: /ws ready (dynamic universe via runtime config)"}
-{"level":30,"time":1776034369861,"pid":10652,"bootSessionId":"1776034369568-10652-aa922a29","host":"0.0.0.0","port":8081,"path":"/ws/private-positions","msg":"private execution ws ready"}
-{"level":30,"time":1776034369875,"pid":10652,"bootSessionId":"1776034369568-10652-aa922a29","msg":"Server listening at http://127.0.0.1:8080"}
-{"level":30,"time":1776034369875,"pid":10652,"bootSessionId":"1776034369568-10652-aa922a29","msg":"Server listening at http://10.35.7.240:8080"}
-{"level":30,"time":1776034369875,"pid":10652,"bootSessionId":"1776034369568-10652-aa922a29","msg":"Server listening at http://192.168.1.104:8080"}
-{"level":30,"time":1776034369876,"pid":10652,"bootSessionId":"1776034369568-10652-aa922a29","host":"0.0.0.0","port":8080,"bootSessionId":"1776034369568-10652-aa922a29","msg":"backend listening"}
-{"level":30,"time":1776034369882,"pid":10652,"bootSessionId":"1776034369568-10652-aa922a29","topics":500,"shards":4,"totalChars":9989,"maxCharsPerShard":3641,"msg":"bybit ws: starting sharded public streams"}

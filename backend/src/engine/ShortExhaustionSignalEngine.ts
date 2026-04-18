@@ -110,6 +110,7 @@ type CandidateThresholds = {
   minTurnoverBurstRatio: number;
   maxUniverseRank: number;
   minTurnover24hUsd: number;
+  maxTurnover24hUsd: number | null;
   minOpenInterestValueUsd: number;
   minTrades1m: number;
   maxSpreadBps: number;
@@ -418,20 +419,21 @@ export class ShortExhaustionSignalEngine {
 
   private getCandidateThresholds(): CandidateThresholds {
     return {
-      minPriceMove1mPct: minCeil(this.cfg.candidate.minPriceMove1mPct, 0.6),
-      minPriceMove3mPct: minCeil(this.cfg.candidate.minPriceMove3mPct, 1.2),
-      minPriceMove5mPct: minCeil(this.cfg.candidate.minPriceMove5mPct, 2),
-      minPriceMove15mPct: minCeil(this.cfg.candidate.minPriceMove15mPct, 3.5),
-      minVolumeBurstRatio: minCeil(this.cfg.candidate.minVolumeBurstRatio, 1.65),
-      minTurnoverBurstRatio: minCeil(this.cfg.candidate.minTurnoverBurstRatio, 1.65),
-      maxUniverseRank: maxFloor(this.cfg.candidate.maxUniverseRank, 8),
+      minPriceMove1mPct: this.cfg.candidate.minPriceMove1mPct,
+      minPriceMove3mPct: this.cfg.candidate.minPriceMove3mPct,
+      minPriceMove5mPct: this.cfg.candidate.minPriceMove5mPct,
+      minPriceMove15mPct: this.cfg.candidate.minPriceMove15mPct,
+      minVolumeBurstRatio: this.cfg.candidate.minVolumeBurstRatio,
+      minTurnoverBurstRatio: this.cfg.candidate.minTurnoverBurstRatio,
+      maxUniverseRank: this.cfg.candidate.maxUniverseRank,
       minTurnover24hUsd: Math.max(0, this.cfg.candidate.minTurnover24hUsd),
-      minOpenInterestValueUsd: minCeil(this.cfg.candidate.minOpenInterestValueUsd, 2_000_000),
-      minTrades1m: minCeil(this.cfg.candidate.minTrades1m, 14),
-      maxSpreadBps: maxFloor(this.cfg.candidate.maxSpreadBps, 30),
-      minDistanceFromLow24hPct: minCeil(this.cfg.candidate.minDistanceFromLow24hPct, 3),
-      minNearDepthUsd: minCeil(this.cfg.candidate.minNearDepthUsd, 15_000),
-      candidateScoreMin: minCeil(this.cfg.candidate.candidateScoreMin, 0.95),
+      maxTurnover24hUsd: this.cfg.candidate.maxTurnover24hUsd,
+      minOpenInterestValueUsd: this.cfg.candidate.minOpenInterestValueUsd,
+      minTrades1m: this.cfg.candidate.minTrades1m,
+      maxSpreadBps: this.cfg.candidate.maxSpreadBps,
+      minDistanceFromLow24hPct: this.cfg.candidate.minDistanceFromLow24hPct,
+      minNearDepthUsd: this.cfg.candidate.minNearDepthUsd,
+      candidateScoreMin: this.cfg.candidate.candidateScoreMin,
     };
   }
 
@@ -465,7 +467,7 @@ export class ShortExhaustionSignalEngine {
     if ((input.turnover24hUsd ?? 0) < thresholds.minTurnover24hUsd) {
       blockers.push("candidate_turnover_below_floor");
     }
-    if (this.cfg.candidate.maxTurnover24hUsd != null && (input.turnover24hUsd ?? 0) > this.cfg.candidate.maxTurnover24hUsd) {
+    if (thresholds.maxTurnover24hUsd != null && (input.turnover24hUsd ?? 0) > thresholds.maxTurnover24hUsd) {
       blockers.push("candidate_turnover_above_cap");
     }
     if ((input.openInterestValue ?? 0) < thresholds.minOpenInterestValueUsd) {

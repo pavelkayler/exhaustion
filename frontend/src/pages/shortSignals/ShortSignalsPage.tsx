@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Card, Col, Container, Form, Row, Table } from "react-bootstrap";
 import { HeaderBar } from "../dashboard/components/HeaderBar";
 import { useSessionRuntime } from "../../features/session/hooks/useSessionRuntime";
+import { resetRuntimeArtifacts } from "../../features/session/api/sessionApi";
 import { useWsFeed } from "../../features/ws/hooks/useWsFeed";
 import type {
   LogEvent,
@@ -98,6 +99,7 @@ export function ShortSignalsPage() {
   const [presetLoading, setPresetLoading] = useState(true);
   const [presetError, setPresetError] = useState<string | null>(null);
   const [presetBusyAction, setPresetBusyAction] = useState<"none" | "save" | "delete" | "apply">("none");
+  const [resetBusy, setResetBusy] = useState(false);
   const [presets, setPresets] = useState<SignalPreset[]>([]);
   const [selectedPresetId, setSelectedPresetId] = useState<string | null>(null);
   const [presetName, setPresetName] = useState("");
@@ -229,6 +231,16 @@ export function ShortSignalsPage() {
     }
   };
 
+  const handleReset = async () => {
+    if (resetBusy) return;
+    setResetBusy(true);
+    try {
+      await resetRuntimeArtifacts();
+    } finally {
+      setResetBusy(false);
+    }
+  };
+
   const signalEventCountBySymbol = useMemo(() => {
     const counts = new Map<string, number>();
     const seen = new Set<string>();
@@ -322,6 +334,9 @@ export function ShortSignalsPage() {
         onStop={() => void stop()}
         onPause={() => void pause()}
         onResume={() => void resume()}
+        canReset={!resetBusy}
+        resetBusy={resetBusy}
+        onReset={() => void handleReset()}
       />
       <Container fluid className="py-3 px-2">
         <Card className="genesis-card mb-3">

@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import path from "node:path";
 import type { FastifyInstance } from "fastify";
 import { BybitDemoRestClient } from "../bybit/BybitDemoRestClient.js";
 import { BybitRealRestClient } from "../bybit/BybitRealRestClient.js";
@@ -85,6 +86,75 @@ function getSignalPresetPayload() {
   };
 }
 
+function removeEmptyDirectories(rootDir: string): number {
+  if (!fs.existsSync(rootDir)) return 0;
+  let removed = 0;
+  const visit = (dirPath: string): void => {
+    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      visit(path.join(dirPath, entry.name));
+    }
+    if (dirPath === rootDir) return;
+    const remaining = fs.readdirSync(dirPath);
+    if (remaining.length === 0) {
+      fs.rmSync(dirPath, { recursive: true, force: true });
+      removed += 1;
+    }
+  };
+  visit(rootDir);
+  return removed;
+}
+
+function resetRuntimeArtifacts(): {
+  deletedFiles: number;
+  deletedDirectories: number;
+  keptSessionId: string | null;
+  keptServerLogPidPattern: string;
+} {
+  const dataRoot = path.resolve(process.cwd(), "data");
+  const sessionsRoot = path.join(dataRoot, "sessions");
+  const serverLogsRoot = path.join(dataRoot, "logs", "server");
+  const keptSessionId = runtime.getStatus().sessionId ?? null;
+  const keptServerLogPidPattern = `-${process.pid}-`;
+  let deletedFiles = 0;
+  let deletedDirectories = 0;
+
+  if (fs.existsSync(sessionsRoot)) {
+    for (const entry of fs.readdirSync(sessionsRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      if (keptSessionId && entry.name === keptSessionId) continue;
+      fs.rmSync(path.join(sessionsRoot, entry.name), { recursive: true, force: true });
+      deletedDirectories += 1;
+    }
+  }
+
+  if (fs.existsSync(serverLogsRoot)) {
+    const stack = [serverLogsRoot];
+    while (stack.length > 0) {
+      const current = stack.pop()!;
+      for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+        const fullPath = path.join(current, entry.name);
+        if (entry.isDirectory()) {
+          stack.push(fullPath);
+          continue;
+        }
+        if (entry.name.includes(keptServerLogPidPattern)) continue;
+        fs.rmSync(fullPath, { force: true });
+        deletedFiles += 1;
+      }
+    }
+    deletedDirectories += removeEmptyDirectories(serverLogsRoot);
+  }
+
+  return {
+    deletedFiles,
+    deletedDirectories,
+    keptSessionId,
+    keptServerLogPidPattern,
+  };
+}
+
 export function setShutdownHandler(handler: (() => Promise<void> | void) | null) {
   shutdownHandler = handler;
 }
@@ -110,6 +180,20 @@ export function registerHttpRoutes(app: FastifyInstance) {
     }
     await shutdownHandler?.();
     return { ok: true };
+  });
+
+  app.post("/api/admin/reset-runtime-artifacts", async (req, reply) => {
+    if (!isLocalRequestIp((req as any).ip)) {
+      reply.code(403);
+      return { error: "forbidden" };
+    }
+    try {
+      const result = resetRuntimeArtifacts();
+      return { ok: true, ...result };
+    } catch (error) {
+      reply.code(400);
+      return { error: String((error as Error)?.message ?? error) };
+    }
   });
 
   app.get("/api/session/status", async () => runtime.getStatus());

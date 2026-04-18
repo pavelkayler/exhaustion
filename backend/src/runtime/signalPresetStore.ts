@@ -4,6 +4,10 @@ import { z } from "zod";
 import { DEFAULT_BOT_ID, getBotDefinition, type BotConfig } from "../bots/registry.js";
 
 export const DEFAULT_SIGNAL_PRESET_ID = "default";
+export const PUMP_FADE_BALANCED_PRESET_ID = "pump_fade_balanced";
+export const PUMP_FADE_STRICT_PRESET_ID = "pump_fade_strict";
+export const PUMP_FADE_AGGRESSIVE_PRESET_ID = "pump_fade_aggressive";
+export const PUMP_FADE_HIGH_FREQUENCY_PRESET_ID = "pump_fade_high_frequency";
 
 const signalThresholdsSchema = z.object({
   candidate: z.object({
@@ -122,6 +126,133 @@ function buildThresholdsBotConfig(base: BotConfig, thresholds: SignalThresholds)
   });
 }
 
+function buildBuiltInPreset(
+  args: {
+    id: string;
+    name: string;
+    candidate: Partial<SignalThresholds["candidate"]>;
+  },
+  existingCreatedAt?: number,
+): SignalPreset {
+  const botDef = getBotDefinition(DEFAULT_BOT_ID);
+  const baseThresholds = extractSignalThresholds(botDef.defaults);
+  const now = Date.now();
+  return signalPresetSchema.parse({
+    id: args.id,
+    name: args.name,
+    thresholds: {
+      ...baseThresholds,
+      candidate: {
+        ...baseThresholds.candidate,
+        ...args.candidate,
+      },
+    },
+    createdAt: existingCreatedAt && existingCreatedAt > 0 ? existingCreatedAt : now,
+    updatedAt: now,
+  });
+}
+
+function getBuiltInPresets(existingById?: Map<string, SignalPreset>): SignalPreset[] {
+  return [
+    buildBuiltInPreset(
+      {
+        id: PUMP_FADE_BALANCED_PRESET_ID,
+        name: "Pump Fade Balanced",
+        candidate: {
+          minPriceMove1mPct: 0.9,
+          minPriceMove3mPct: 2.0,
+          minPriceMove5mPct: 3.8,
+          minPriceMove15mPct: 6.0,
+          minVolumeBurstRatio: 2.2,
+          minTurnoverBurstRatio: 2.2,
+          maxUniverseRank: 3,
+          minTurnover24hUsd: 35_000_000,
+          maxTurnover24hUsd: null,
+          minOpenInterestValueUsd: 5_000_000,
+          minTrades1m: 50,
+          maxSpreadBps: 20,
+          minDistanceFromLow24hPct: 8,
+          minNearDepthUsd: 30_000,
+          candidateScoreMin: 1.4,
+        },
+      },
+      existingById?.get(PUMP_FADE_BALANCED_PRESET_ID)?.createdAt,
+    ),
+    buildBuiltInPreset(
+      {
+        id: PUMP_FADE_STRICT_PRESET_ID,
+        name: "Pump Fade Strict",
+        candidate: {
+          minPriceMove1mPct: 1.0,
+          minPriceMove3mPct: 2.2,
+          minPriceMove5mPct: 4.2,
+          minPriceMove15mPct: 6.5,
+          minVolumeBurstRatio: 2.4,
+          minTurnoverBurstRatio: 2.4,
+          maxUniverseRank: 3,
+          minTurnover24hUsd: 45_000_000,
+          maxTurnover24hUsd: null,
+          minOpenInterestValueUsd: 6_000_000,
+          minTrades1m: 60,
+          maxSpreadBps: 18,
+          minDistanceFromLow24hPct: 9,
+          minNearDepthUsd: 40_000,
+          candidateScoreMin: 1.48,
+        },
+      },
+      existingById?.get(PUMP_FADE_STRICT_PRESET_ID)?.createdAt,
+    ),
+    buildBuiltInPreset(
+      {
+        id: PUMP_FADE_AGGRESSIVE_PRESET_ID,
+        name: "Pump Fade Aggressive",
+        candidate: {
+          minPriceMove1mPct: 0.75,
+          minPriceMove3mPct: 1.6,
+          minPriceMove5mPct: 2.8,
+          minPriceMove15mPct: 4.8,
+          minVolumeBurstRatio: 1.9,
+          minTurnoverBurstRatio: 1.9,
+          maxUniverseRank: 5,
+          minTurnover24hUsd: 20_000_000,
+          maxTurnover24hUsd: null,
+          minOpenInterestValueUsd: 3_500_000,
+          minTrades1m: 35,
+          maxSpreadBps: 24,
+          minDistanceFromLow24hPct: 6,
+          minNearDepthUsd: 20_000,
+          candidateScoreMin: 1.18,
+        },
+      },
+      existingById?.get(PUMP_FADE_AGGRESSIVE_PRESET_ID)?.createdAt,
+    ),
+    buildBuiltInPreset(
+      {
+        id: PUMP_FADE_HIGH_FREQUENCY_PRESET_ID,
+        name: "Pump Fade High Frequency",
+        candidate: {
+          minPriceMove1mPct: 0.65,
+          minPriceMove3mPct: 1.35,
+          minPriceMove5mPct: 2.4,
+          minPriceMove15mPct: 4.2,
+          minVolumeBurstRatio: 1.75,
+          minTurnoverBurstRatio: 1.75,
+          maxUniverseRank: 6,
+          minTurnover24hUsd: 15_000_000,
+          maxTurnover24hUsd: null,
+          minOpenInterestValueUsd: 2_500_000,
+          minTrades1m: 28,
+          maxSpreadBps: 26,
+          minDistanceFromLow24hPct: 5,
+          minNearDepthUsd: 16_000,
+          candidateScoreMin: 1.05,
+        },
+      },
+      existingById?.get(PUMP_FADE_HIGH_FREQUENCY_PRESET_ID)?.createdAt,
+    ),
+  ];
+}
+
 export function extractSignalThresholds(botConfig: BotConfig): SignalThresholds {
   return signalThresholdsSchema.parse({
     candidate: {
@@ -208,13 +339,47 @@ class SignalPresetStore {
     this.state = initial;
   }
 
-  private ensureDefaultPreset(): void {
-    if (this.state.presets.some((preset) => preset.id === DEFAULT_SIGNAL_PRESET_ID)) return;
-    this.state.presets.unshift(makeDefaultPreset());
+  private ensureBuiltInPresets(): boolean {
+    let changed = false;
+    const nextPresets = this.state.presets.slice();
+    if (!nextPresets.some((preset) => preset.id === DEFAULT_SIGNAL_PRESET_ID)) {
+      nextPresets.unshift(makeDefaultPreset());
+      changed = true;
+    }
+
+    const existingById = new Map(nextPresets.map((preset) => [preset.id, preset] as const));
+    for (const builtInPreset of getBuiltInPresets(existingById)) {
+      const existing = existingById.get(builtInPreset.id) ?? null;
+      if (!existing) {
+        nextPresets.push(builtInPreset);
+        changed = true;
+        continue;
+      }
+      const sameName = existing.name === builtInPreset.name;
+      const sameThresholds = JSON.stringify(existing.thresholds) === JSON.stringify(builtInPreset.thresholds);
+      if (sameName && sameThresholds) continue;
+      const createdAt = existing.createdAt;
+      nextPresets.splice(
+        nextPresets.findIndex((preset) => preset.id === builtInPreset.id),
+        1,
+        {
+          ...builtInPreset,
+          createdAt,
+        },
+      );
+      changed = true;
+    }
+
+    if (changed) {
+      this.state = { presets: nextPresets };
+    }
+    return changed;
   }
 
   getAll(): SignalPreset[] {
-    this.ensureDefaultPreset();
+    if (this.ensureBuiltInPresets()) {
+      this.persist();
+    }
     return this.state.presets
       .slice()
       .sort((left, right) => {
@@ -226,7 +391,9 @@ class SignalPresetStore {
   }
 
   getById(id: string): SignalPreset | null {
-    this.ensureDefaultPreset();
+    if (this.ensureBuiltInPresets()) {
+      this.persist();
+    }
     const normalizedId = String(id ?? "").trim();
     if (!normalizedId) return null;
     const preset = this.state.presets.find((entry) => entry.id === normalizedId) ?? null;
@@ -234,7 +401,6 @@ class SignalPresetStore {
   }
 
   persist(): void {
-    this.ensureDefaultPreset();
     writeFileAtomic(
       SIGNAL_PRESETS_FILE_PATH,
       JSON.stringify({ presets: this.state.presets }, null, 2),
@@ -242,7 +408,7 @@ class SignalPresetStore {
   }
 
   save(input: { id?: string | null; name: string; thresholds: unknown }): SignalPreset {
-    this.ensureDefaultPreset();
+    this.ensureBuiltInPresets();
     const desiredId = String(input.id ?? "").trim();
     const existing = desiredId
       ? this.state.presets.find((preset) => preset.id === desiredId) ?? null
@@ -268,7 +434,7 @@ class SignalPresetStore {
   }
 
   delete(id: string): { deleted: boolean } {
-    this.ensureDefaultPreset();
+    this.ensureBuiltInPresets();
     const normalizedId = String(id ?? "").trim();
     if (!normalizedId || normalizedId === DEFAULT_SIGNAL_PRESET_ID) {
       return { deleted: false };

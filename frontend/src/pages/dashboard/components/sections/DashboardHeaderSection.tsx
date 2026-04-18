@@ -1,5 +1,7 @@
 import { HeaderBar } from "../HeaderBar";
 import { useDashboardPageContext } from "../../context/DashboardPageContext";
+import { resetRuntimeArtifacts } from "../../../../features/session/api/sessionApi";
+import { useState } from "react";
 
 export function DashboardHeaderSection() {
   const {
@@ -18,6 +20,17 @@ export function DashboardHeaderSection() {
     pause,
     resume,
   } = useDashboardPageContext();
+  const [resetBusy, setResetBusy] = useState(false);
+
+  const handleReset = async () => {
+    if (resetBusy) return;
+    setResetBusy(true);
+    try {
+      await resetRuntimeArtifacts();
+    } finally {
+      setResetBusy(false);
+    }
+  };
 
   return (
     <HeaderBar
@@ -36,6 +49,9 @@ export function DashboardHeaderSection() {
       onResume={() => void resume()}
       canPause={canPause}
       canResume={canResume}
+      canReset={!resetBusy}
+      resetBusy={resetBusy}
+      onReset={() => void handleReset()}
     />
   );
 }

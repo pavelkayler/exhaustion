@@ -56,28 +56,28 @@
         }
       },
       "createdAt": 1776469817431,
-      "updatedAt": 1776471687155
+      "updatedAt": 1776504889728
     },
     {
-      "id": "preset_1776470192269",
-      "name": "200k",
+      "id": "pump_fade_balanced",
+      "name": "Pump Fade Balanced",
       "thresholds": {
         "candidate": {
-          "minPriceMove1mPct": 0.8,
-          "minPriceMove3mPct": 1.8,
-          "minPriceMove5mPct": 3,
-          "minPriceMove15mPct": 5,
-          "minVolumeBurstRatio": 2,
-          "minTurnoverBurstRatio": 2,
-          "maxUniverseRank": 5,
-          "minTurnover24hUsd": 200000,
+          "minPriceMove1mPct": 0.9,
+          "minPriceMove3mPct": 2,
+          "minPriceMove5mPct": 3.8,
+          "minPriceMove15mPct": 6,
+          "minVolumeBurstRatio": 2.2,
+          "minTurnoverBurstRatio": 2.2,
+          "maxUniverseRank": 3,
+          "minTurnover24hUsd": 35000000,
           "maxTurnover24hUsd": null,
-          "minOpenInterestValueUsd": 3000000,
-          "minTrades1m": 25,
-          "maxSpreadBps": 25,
-          "minDistanceFromLow24hPct": 5,
-          "minNearDepthUsd": 20000,
-          "candidateScoreMin": 1.25
+          "minOpenInterestValueUsd": 5000000,
+          "minTrades1m": 50,
+          "maxSpreadBps": 20,
+          "minDistanceFromLow24hPct": 8,
+          "minNearDepthUsd": 30000,
+          "candidateScoreMin": 1.4
         },
         "derivatives": {
           "minOiMove1mPct": 0.35,
@@ -113,8 +113,182 @@
           "totalScoreMin": 2.75
         }
       },
-      "createdAt": 1776470192269,
-      "updatedAt": 1776471718894
+      "createdAt": 1776474665193,
+      "updatedAt": 1776504889729
+    },
+    {
+      "id": "pump_fade_strict",
+      "name": "Pump Fade Strict",
+      "thresholds": {
+        "candidate": {
+          "minPriceMove1mPct": 1,
+          "minPriceMove3mPct": 2.2,
+          "minPriceMove5mPct": 4.2,
+          "minPriceMove15mPct": 6.5,
+          "minVolumeBurstRatio": 2.4,
+          "minTurnoverBurstRatio": 2.4,
+          "maxUniverseRank": 3,
+          "minTurnover24hUsd": 45000000,
+          "maxTurnover24hUsd": null,
+          "minOpenInterestValueUsd": 6000000,
+          "minTrades1m": 60,
+          "maxSpreadBps": 18,
+          "minDistanceFromLow24hPct": 9,
+          "minNearDepthUsd": 40000,
+          "candidateScoreMin": 1.48
+        },
+        "derivatives": {
+          "minOiMove1mPct": 0.35,
+          "minOiMove5mPct": 1.2,
+          "minOiAccelerationPct": 0.05,
+          "minFundingAbsPct": 0.01,
+          "useLongShortRatio": false,
+          "minLongShortRatio": 1.1,
+          "longShortRatioWeight": 0.12,
+          "minShortLiquidationUsd60s": 25000,
+          "minShortLiquidationBurstRatio60s": 1.5,
+          "minShortLiquidationImbalance60s": 0.2,
+          "derivativesScoreMin": 0.85
+        },
+        "exhaustion": {
+          "maxPriceContinuation30sPct": 0.3,
+          "maxPriceContinuation1mPct": 0.9,
+          "maxOiAccelerationPct": 0.15,
+          "minNegativeCvdDelta": 1,
+          "minNegativeCvdImbalance": 0.05,
+          "exhaustionScoreMin": 0.7
+        },
+        "microstructure": {
+          "minAskToBidDepthRatio": 1.05,
+          "minSellSideImbalance": 0.04,
+          "maxNearestAskWallBps": 12,
+          "minNearestBidWallBps": 8,
+          "maxSpreadBps": 35,
+          "minNearDepthUsd": 15000,
+          "microstructureScoreMin": 0.55
+        },
+        "observe": {
+          "totalScoreMin": 2.75
+        }
+      },
+      "createdAt": 1776474665194,
+      "updatedAt": 1776504889729
+    },
+    {
+      "id": "pump_fade_aggressive",
+      "name": "Pump Fade Aggressive",
+      "thresholds": {
+        "candidate": {
+          "minPriceMove1mPct": 0.75,
+          "minPriceMove3mPct": 1.6,
+          "minPriceMove5mPct": 2.8,
+          "minPriceMove15mPct": 4.8,
+          "minVolumeBurstRatio": 1.9,
+          "minTurnoverBurstRatio": 1.9,
+          "maxUniverseRank": 5,
+          "minTurnover24hUsd": 20000000,
+          "maxTurnover24hUsd": null,
+          "minOpenInterestValueUsd": 3500000,
+          "minTrades1m": 35,
+          "maxSpreadBps": 24,
+          "minDistanceFromLow24hPct": 6,
+          "minNearDepthUsd": 20000,
+          "candidateScoreMin": 1.18
+        },
+        "derivatives": {
+          "minOiMove1mPct": 0.35,
+          "minOiMove5mPct": 1.2,
+          "minOiAccelerationPct": 0.05,
+          "minFundingAbsPct": 0.01,
+          "useLongShortRatio": false,
+          "minLongShortRatio": 1.1,
+          "longShortRatioWeight": 0.12,
+          "minShortLiquidationUsd60s": 25000,
+          "minShortLiquidationBurstRatio60s": 1.5,
+          "minShortLiquidationImbalance60s": 0.2,
+          "derivativesScoreMin": 0.85
+        },
+        "exhaustion": {
+          "maxPriceContinuation30sPct": 0.3,
+          "maxPriceContinuation1mPct": 0.9,
+          "maxOiAccelerationPct": 0.15,
+          "minNegativeCvdDelta": 1,
+          "minNegativeCvdImbalance": 0.05,
+          "exhaustionScoreMin": 0.7
+        },
+        "microstructure": {
+          "minAskToBidDepthRatio": 1.05,
+          "minSellSideImbalance": 0.04,
+          "maxNearestAskWallBps": 12,
+          "minNearestBidWallBps": 8,
+          "maxSpreadBps": 35,
+          "minNearDepthUsd": 15000,
+          "microstructureScoreMin": 0.55
+        },
+        "observe": {
+          "totalScoreMin": 2.75
+        }
+      },
+      "createdAt": 1776504895078,
+      "updatedAt": 1776504895078
+    },
+    {
+      "id": "pump_fade_high_frequency",
+      "name": "Pump Fade High Frequency",
+      "thresholds": {
+        "candidate": {
+          "minPriceMove1mPct": 0.65,
+          "minPriceMove3mPct": 1.35,
+          "minPriceMove5mPct": 2.4,
+          "minPriceMove15mPct": 4.2,
+          "minVolumeBurstRatio": 1.75,
+          "minTurnoverBurstRatio": 1.75,
+          "maxUniverseRank": 6,
+          "minTurnover24hUsd": 15000000,
+          "maxTurnover24hUsd": null,
+          "minOpenInterestValueUsd": 2500000,
+          "minTrades1m": 28,
+          "maxSpreadBps": 26,
+          "minDistanceFromLow24hPct": 5,
+          "minNearDepthUsd": 16000,
+          "candidateScoreMin": 1.05
+        },
+        "derivatives": {
+          "minOiMove1mPct": 0.35,
+          "minOiMove5mPct": 1.2,
+          "minOiAccelerationPct": 0.05,
+          "minFundingAbsPct": 0.01,
+          "useLongShortRatio": false,
+          "minLongShortRatio": 1.1,
+          "longShortRatioWeight": 0.12,
+          "minShortLiquidationUsd60s": 25000,
+          "minShortLiquidationBurstRatio60s": 1.5,
+          "minShortLiquidationImbalance60s": 0.2,
+          "derivativesScoreMin": 0.85
+        },
+        "exhaustion": {
+          "maxPriceContinuation30sPct": 0.3,
+          "maxPriceContinuation1mPct": 0.9,
+          "maxOiAccelerationPct": 0.15,
+          "minNegativeCvdDelta": 1,
+          "minNegativeCvdImbalance": 0.05,
+          "exhaustionScoreMin": 0.7
+        },
+        "microstructure": {
+          "minAskToBidDepthRatio": 1.05,
+          "minSellSideImbalance": 0.04,
+          "maxNearestAskWallBps": 12,
+          "minNearestBidWallBps": 8,
+          "maxSpreadBps": 35,
+          "minNearDepthUsd": 15000,
+          "microstructureScoreMin": 0.55
+        },
+        "observe": {
+          "totalScoreMin": 2.75
+        }
+      },
+      "createdAt": 1776504895078,
+      "updatedAt": 1776504919589
     }
   ]
 }

@@ -136,6 +136,7 @@ const TRAILING_RECONCILE_RETRY_MS = 5_000;
 const TRAILING_RECONCILE_DEBOUNCE_MS = 250;
 const ORDER_MAINTENANCE_INTERVAL_MS = 30_000;
 const EXECUTOR_ORDER_LINK_PREFIX = "executor";
+const EXECUTOR_ORDER_NOTIONAL_OVERSPEND_TOLERANCE_RATIO = 0.03;
 
 function deepClone<T>(value: T): T {
   return structuredClone(value);
@@ -488,6 +489,46 @@ function roundDownToStep(value: number, step: number): number {
   return Number((Math.floor(value / step) * step).toFixed(precision));
 }
 
+function roundUpToStep(value: number, step: number): number {
+  if (!Number.isFinite(value)) return 0;
+  if (!Number.isFinite(step) || step <= 0) return value;
+  const precision = stepPrecision(step);
+  return Number((Math.ceil(value / step) * step).toFixed(precision));
+}
+
+export function selectEntryQtyWithinTolerance(args: {
+  targetNotional: number;
+  price: number;
+  qtyStep: number;
+  overspendToleranceRatio?: number;
+}): number {
+  const toleranceRatio = Number.isFinite(args.overspendToleranceRatio)
+    ? Math.max(0, Number(args.overspendToleranceRatio))
+    : EXECUTOR_ORDER_NOTIONAL_OVERSPEND_TOLERANCE_RATIO;
+  if (!(args.targetNotional > 0) || !(args.price > 0)) return 0;
+
+  const rawQty = args.targetNotional / args.price;
+  const roundedDownQty = roundDownToStep(rawQty, args.qtyStep);
+  const roundedUpQty = roundUpToStep(rawQty, args.qtyStep);
+
+  if (!(roundedDownQty > 0)) {
+    const roundedUpNotional = roundedUpQty * args.price;
+    if (roundedUpQty > 0 && roundedUpNotional <= args.targetNotional * (1 + toleranceRatio)) {
+      return roundedUpQty;
+    }
+    return 0;
+  }
+
+  if (roundedUpQty > roundedDownQty) {
+    const roundedUpNotional = roundedUpQty * args.price;
+    if (roundedUpNotional <= args.targetNotional * (1 + toleranceRatio)) {
+      return roundedUpQty;
+    }
+  }
+
+  return roundedDownQty;
+}
+
 function normalizeSignalState(value: unknown): string {
   return String(value ?? "").trim().toUpperCase();
 }
@@ -564,6 +605,10 @@ function buildCancelOrderParams(row: StoredOrderRow): Record<string, unknown> | 
 
 function computeShortEntryPrice(referencePrice: number, offsetPct: number): number {
   return referencePrice * (1 + (Math.max(0, offsetPct) / 100));
+}
+
+export function shouldPlaceFirstShortEntryAsMarket(orderIndex: number, offsetPct: number): boolean {
+  return orderIndex === 0 && !(offsetPct > 0);
 }
 
 function computeShortGridEntryPrice(
@@ -2007,8 +2052,11 @@ class PrivateExecutionExecutorManager {
           throw new Error(`invalid_entry_price:${args.symbol}:${index + 1}`);
         }
 
-        const rawQty = (marginPerOrder * Number(args.settings.leverage)) / price;
-        const qty = roundDownToStep(rawQty, instrument.qtyStep);
+        const qty = selectEntryQtyWithinTolerance({
+          targetNotional: marginPerOrder * Number(args.settings.leverage),
+          price,
+          qtyStep: instrument.qtyStep,
+        });
         if (!(qty > 0)) {
           throw new Error(`invalid_entry_qty:${args.symbol}:${index + 1}`);
         }
@@ -2016,13 +2064,18 @@ class PrivateExecutionExecutorManager {
         const orderLinkId = buildExecutorOrderLinkId(args.reason, args.symbol, batchTs, index + 1);
         createdOrderLinkIds.push(orderLinkId);
 
+        const useMarketOrder = shouldPlaceFirstShortEntryAsMarket(
+          index,
+          args.settings.firstOrderOffsetPct,
+        );
+
         const request = {
           symbol: args.symbol,
           side: "Sell",
-          orderType: "Limit",
-          price: formatForApi(price),
+          orderType: useMarketOrder ? "Market" : "Limit",
+          ...(useMarketOrder ? {} : { price: formatForApi(price) }),
           qty: formatForApi(qty),
-          timeInForce: "GTC",
+          timeInForce: useMarketOrder ? "IOC" : "GTC",
           positionIdx: 2,
           orderLinkId,
         };

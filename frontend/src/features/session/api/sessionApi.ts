@@ -30,6 +30,32 @@ export async function resumeSession(): Promise<StatusResponse> {
   return requestWsRpc<StatusResponse>("session.resume", {});
 }
 
+export async function resetRuntimeArtifacts(): Promise<{
+  ok: boolean;
+  deletedFiles: number;
+  deletedDirectories: number;
+  keptSessionId: string | null;
+  keptServerLogPidPattern: string;
+}> {
+  const api = getApiBase();
+  const response = await fetch(`${api}/api/admin/reset-runtime-artifacts`, {
+    method: "POST",
+    credentials: "same-origin",
+  });
+  const text = await response.text();
+  const data = text.length > 0 ? JSON.parse(text) : null;
+  if (!response.ok) {
+    throw new Error(String((data as { error?: unknown } | null)?.error ?? response.statusText));
+  }
+  return data as {
+    ok: boolean;
+    deletedFiles: number;
+    deletedDirectories: number;
+    keptSessionId: string | null;
+    keptServerLogPidPattern: string;
+  };
+}
+
 export function getEventsDownloadUrl(): string {
   const api = getApiBase();
   return `${api}/api/session/events/download`;

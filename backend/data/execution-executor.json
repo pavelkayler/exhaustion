@@ -5,7 +5,7 @@
     "leverage": 10,
     "tpPct": 5,
     "slPct": 33.3333,
-    "firstOrderOffsetPct": 0.01,
+    "firstOrderOffsetPct": 0,
     "gridOrdersCount": 3,
     "gridStepPct": 10,
     "orderAliveMin": 0,
@@ -18,6 +18,6 @@
   },
   "running": true,
   "error": null,
-  "updatedAt": 1776471744867,
+  "updatedAt": 1776504986778,
   "positionStates": {}
 }

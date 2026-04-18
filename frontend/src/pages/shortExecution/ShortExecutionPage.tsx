@@ -1,9 +1,11 @@
 import { Col, Container, Row } from "react-bootstrap";
 import { HeaderBar } from "../dashboard/components/HeaderBar";
+import { resetRuntimeArtifacts } from "../../features/session/api/sessionApi";
 import { useSessionRuntime } from "../../features/session/hooks/useSessionRuntime";
 import { useWsFeed } from "../../features/ws/hooks/useWsFeed";
 import { usePrivatePositionsFeed } from "../../features/positions/hooks/usePrivatePositionsFeed";
 import { useExecutorRuntime } from "../../features/executor/hooks/useExecutorRuntime";
+import { useState } from "react";
 import {
   type NumericFieldKey,
 } from "./model";
@@ -13,6 +15,7 @@ import { ExecutionOrdersCard } from "./components/ExecutionOrdersCard";
 import { ExecutionSettingsCard } from "./components/ExecutionSettingsCard";
 
 export function ShortExecutionPage() {
+  const [resetBusy, setResetBusy] = useState(false);
   const { conn, lastServerTime, wsUrl, streams, rows } = useWsFeed();
   const {
     status,
@@ -57,6 +60,16 @@ export function ShortExecutionPage() {
     void executor.updateSettings({ exit });
   };
 
+  const handleReset = async () => {
+    if (resetBusy) return;
+    setResetBusy(true);
+    try {
+      await resetRuntimeArtifacts();
+    } finally {
+      setResetBusy(false);
+    }
+  };
+
   const sessionActive =
     status.sessionState === "RUNNING" ||
     status.sessionState === "PAUSED" ||
@@ -90,6 +103,9 @@ export function ShortExecutionPage() {
         onStop={() => void stop()}
         onPause={() => void pause()}
         onResume={() => void resume()}
+        canReset={!resetBusy}
+        resetBusy={resetBusy}
+        onReset={() => void handleReset()}
         canRefresh={!executionFeed.refreshing}
         refreshBusy={executionFeed.refreshing}
         onRefresh={() => void executionFeed.refresh()}

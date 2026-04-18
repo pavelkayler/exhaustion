@@ -39,6 +39,10 @@
 - every remaining backend source file is reachable from `backend/src/index.ts`
 - no unresolved relative imports remain in the cleaned tree
 
+## Follow-up notes
+- candidate-threshold fix and built-in pump-fade presets: `docs/50_candidate_threshold_fix_and_pump_fade_presets.md`
+- aggressive built-in pump-fade presets for higher Candidate frequency: `docs/51_aggressive_pump_fade_presets.md`
+
 ## Removed backend source files
 - `backend/src/analytics/shortSignalMinuteBarStore.ts`
 - `backend/src/analytics/shortSignalOutcomeRules.ts`

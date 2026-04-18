@@ -188,8 +188,8 @@ export function SignalPresetEditorCard(props: Props) {
         </Row>
 
         <div className="text-secondary small mb-3">
-          Apply сохраняет пороги на бэке и, если сессия уже была запущена, сначала останавливает ее.
-          После применения пресета запуск выполняется вручную кнопкой Start в шапке.
+          Built-ins `Pump Fade Balanced`, `Pump Fade Strict`, `Pump Fade Aggressive`, and `Pump Fade High Frequency` are Candidate-oriented presets for pump-fade entries, from stricter to more aggressive.
+          Apply stores thresholds on the backend and, if the session is running, stops it first. Start remains manual from the header.
         </div>
 
         {thresholds == null ? (
