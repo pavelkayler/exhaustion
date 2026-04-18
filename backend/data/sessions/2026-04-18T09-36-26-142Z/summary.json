@@ -1,0 +1,32 @@
+{
+  "summary": {
+    "generatedAt": 1776506409639,
+    "sessionId": "2026-04-18T09-36-26-142Z",
+    "startTs": 1776504986143,
+    "endTs": 1776506409619,
+    "durationSec": 1423.476,
+    "trades": {
+      "total": 0,
+      "wins": 0,
+      "losses": 0,
+      "winRate": null,
+      "avgWin": null,
+      "avgLoss": null,
+      "expectancy": null,
+      "avgHoldSec": null
+    },
+    "pnl": {
+      "netRealized": 0,
+      "grossFromMove": 0,
+      "funding": 0,
+      "fees": 0
+    },
+    "equity": {
+      "maxDrawdown": null,
+      "peak": 0,
+      "trough": 0
+    },
+    "perSymbol": []
+  },
+  "trades": []
+}

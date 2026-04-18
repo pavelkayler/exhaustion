@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-set -euo pipefail
+[ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@"
+set -eu
+(set -o pipefail) 2>/dev/null && set -o pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$REPO_ROOT/backend"
@@ -38,6 +40,9 @@ if ((exit_code != 0)); then
 fi
 
 echo "[backend] Starting backend server..."
+export SERVER_LOG_STDOUT=1
+export SERVER_LOG_STDOUT_FORCE=1
+echo "[backend] SERVER_LOG_STDOUT=1 SERVER_LOG_STDOUT_FORCE=1"
 node dist/index.js &
 child_pid=$!
 printf '%s\n' "$child_pid" >"$BACKEND_PIDFILE"

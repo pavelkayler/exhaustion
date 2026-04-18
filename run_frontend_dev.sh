@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-set -euo pipefail
+[ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@"
+set -eu
+(set -o pipefail) 2>/dev/null && set -o pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FRONTEND_DIR="$REPO_ROOT/frontend"

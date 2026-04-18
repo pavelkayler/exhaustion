@@ -48,6 +48,15 @@ function buildLogFileName(bootSessionId: string, part: number): string {
 }
 
 function shouldMirrorLogsToStdout(): boolean {
+  const forced = String(process.env.SERVER_LOG_STDOUT_FORCE ?? "0").trim().toLowerCase();
+  if (
+    forced === "1" ||
+    forced === "true" ||
+    forced === "yes" ||
+    forced === "on"
+  ) {
+    return true;
+  }
   const raw = String(process.env.SERVER_LOG_STDOUT ?? "0").trim().toLowerCase();
   return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
 }
