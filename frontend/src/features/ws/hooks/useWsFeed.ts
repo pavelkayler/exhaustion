@@ -25,7 +25,7 @@ type ClientWsMessage =
   | { type: "rpc_request"; id: string; action: WsRpcAction; payload?: unknown };
 
 type PendingRpcRequest = {
-  resolve: (value: unknown) => void;
+  resolve: (value: any) => void;
   reject: (error: Error) => void;
   timer: number;
 };

@@ -27,6 +27,8 @@ export type ExecutionOrderRow = {
   margin: number | null;
   leverage: number | null;
   entryPrice: number | null;
+  entryBatch: string | null;
+  entrySlot: number | null;
   placedAt: number | null;
   updatedAt: number | null;
 };

@@ -87,6 +87,8 @@ type ShortSignalMinuteBar = {
 
 let awaitStreamsProvider: AwaitStreamsProvider | null = null;
 let streamLifecycleSyncProvider: (() => void) | null = null;
+let suspendedStreamLifecycleSyncDepth = 0;
+let pendingStreamLifecycleSync = false;
 let manualTestOrderProvider: ((args: { symbol: string; side: "LONG" | "SHORT"; executionMode?: "demo" | "real"; entryPrice?: number; tpPrice?: number; slPrice?: number; marginUSDT?: number; leverage?: number }) => Promise<any>) | null = null;
 const wsProbeBotIds = new Set<string>();
 
@@ -198,7 +200,24 @@ export async function awaitAllStreamsConnected(args: AwaitAllStreamsConnectedArg
 }
 
 export function requestStreamLifecycleSync() {
+  if (suspendedStreamLifecycleSyncDepth > 0) {
+    pendingStreamLifecycleSync = true;
+    return;
+  }
   streamLifecycleSyncProvider?.();
+}
+
+export async function runWithSuspendedStreamLifecycleSync<T>(fn: () => Promise<T>): Promise<T> {
+  suspendedStreamLifecycleSyncDepth += 1;
+  try {
+    return await fn();
+  } finally {
+    suspendedStreamLifecycleSyncDepth = Math.max(0, suspendedStreamLifecycleSyncDepth - 1);
+    if (suspendedStreamLifecycleSyncDepth === 0 && pendingStreamLifecycleSync) {
+      pendingStreamLifecycleSync = false;
+      streamLifecycleSyncProvider?.();
+    }
+  }
 }
 
 export async function submitManualTestOrder(args: { symbol: string; side: "LONG" | "SHORT"; executionMode?: "demo" | "real"; entryPrice?: number; tpPrice?: number; slPrice?: number; marginUSDT?: number; leverage?: number }) {
@@ -2607,6 +2626,15 @@ export function createWsHub(app: FastifyInstance) {
     broadcastStreamsState();
   }
 
+  function syncRuntimeStreamLifecycleSafely() {
+    if (suspendedStreamLifecycleSyncDepth > 0) {
+      pendingStreamLifecycleSync = true;
+      return;
+    }
+    syncRuntimeStreamLifecycle();
+    broadcastSnapshot();
+  }
+
   const onRuntimeState = () => {
     const st = runtime.getStatus();
     clearShortRuntimeContextsCache();
@@ -2620,8 +2648,7 @@ export function createWsHub(app: FastifyInstance) {
     } else if (st.sessionState === "STOPPED") {
       sessionConfigSnapshot = null;
     }
-    syncRuntimeStreamLifecycle();
-    broadcastSnapshot();
+    syncRuntimeStreamLifecycleSafely();
   };
   const onRuntimeEvent = (ev: LogEvent) => {
     if (isShortSignalEventType((ev as any)?.type)) {
@@ -3092,10 +3119,7 @@ export function createWsHub(app: FastifyInstance) {
     });
   };
 
-  streamLifecycleSyncProvider = () => {
-    syncRuntimeStreamLifecycle();
-    broadcastSnapshot();
-  };
+  streamLifecycleSyncProvider = syncRuntimeStreamLifecycleSafely;
 
   function applySubscriptions(reason: string) {
     if (!streamsEnabled) return;
@@ -3115,8 +3139,7 @@ export function createWsHub(app: FastifyInstance) {
         cvdMode: requirement.cvdMode,
         marketMode: requirement.marketMode,
       }, "streams toggle ignored because recorder/runtime requires active streams");
-      syncRuntimeStreamLifecycle();
-      broadcastSnapshot();
+      syncRuntimeStreamLifecycleSafely();
       return;
     }
 
@@ -3171,7 +3194,7 @@ export function createWsHub(app: FastifyInstance) {
     if (minuteOiRecorder.getStatus().mode !== "off" || cvdRecorder.getStatus().mode !== "off" || minuteMarketRecorder.getStatus().mode !== "off") {
       await ensureRecorderSeededSymbols();
     }
-    syncRuntimeStreamLifecycle();
+    syncRuntimeStreamLifecycleSafely();
     lastStreamGuardTickAt = Date.now();
     marketProcessTimer = setInterval(() => {
       flushPendingMarketData();
@@ -3218,7 +3241,7 @@ export function createWsHub(app: FastifyInstance) {
         }
         return;
       }
-      syncRuntimeStreamLifecycle();
+      syncRuntimeStreamLifecycleSafely();
     }, STREAM_GUARD_INTERVAL_MS);
     broadcastSnapshot();
 
@@ -3292,7 +3315,7 @@ export function createWsHub(app: FastifyInstance) {
       optimizerWsClients.add(ws);
     });
 
-    syncRuntimeStreamLifecycle();
+    syncRuntimeStreamLifecycleSafely();
 
     app.log.info("wsHub: /ws ready (dynamic universe via runtime config)");
   });

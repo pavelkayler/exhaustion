@@ -54,6 +54,8 @@ type ExecutionOrderRow = {
   margin: number | null;
   leverage: number | null;
   entryPrice: number | null;
+  entryBatch: string | null;
+  entrySlot: number | null;
   placedAt: number | null;
   updatedAt: number | null;
 };
@@ -102,6 +104,7 @@ type ExecutionRestClient = {
 
 type StoredPositionRow = ExecutionPositionRow & {
   leverage: number | null;
+  optimisticProtectionOnly: boolean;
   updatedAt: number;
 };
 
@@ -293,6 +296,7 @@ function normalizePositionRow(
     positionIdx: mergeNullableNumber(previous?.positionIdx ?? null, row, ["positionIdx"]),
     updatedAt,
     leverage: mergeNullableNumber(previous?.leverage ?? null, row, ["leverage"], { positiveOnly: true }),
+    optimisticProtectionOnly: false,
   };
 }
 
@@ -357,6 +361,7 @@ function normalizeOrderRow(
     ?? readPositiveNumber(row.initialMargin)
     ?? readPositiveNumber(row.leavesValue)
     ?? (value != null && leverage != null && leverage > 0 ? value / leverage : null);
+  const { entryBatch, entrySlot } = parseExecutorOrderLinkId(row.orderLinkId);
 
   return {
     key,
@@ -366,6 +371,8 @@ function normalizeOrderRow(
     margin,
     leverage,
     entryPrice,
+    entryBatch,
+    entrySlot,
     placedAt:
       readNumber(row.createdTime)
       ?? readNumber(row.createdAt)
@@ -434,11 +441,40 @@ function computeTpPrice(entryPrice: number, side: string | null, tpPct: number):
     : entryPrice * (1 + ratio);
 }
 
-function computeSlPrice(entryPrice: number, side: string | null, slPct: number): number {
-  const ratio = Math.max(0, slPct) / 100;
+function computeLossBoundStopPrice(args: {
+  entryPrice: number;
+  side: string | null;
+  positionSize: number;
+  maxLossUsdt: number;
+}): number {
+  const { entryPrice, side, positionSize, maxLossUsdt } = args;
+  const normalizedSize = Math.abs(Number(positionSize));
+  if (!(entryPrice > 0) || !(normalizedSize > 0) || !(maxLossUsdt > 0)) {
+    return entryPrice;
+  }
+  const ratio = maxLossUsdt / normalizedSize;
   return String(side ?? "").trim().toUpperCase() === "SELL"
-    ? entryPrice * (1 + ratio)
-    : entryPrice * (1 - ratio);
+    ? entryPrice + ratio
+    : entryPrice - ratio;
+}
+
+function estimateFilledGridOrders(args: {
+  entryPrice: number;
+  positionSize: number;
+  marginPerOrder: number;
+  leverage: number;
+}): number {
+  const { entryPrice, positionSize, marginPerOrder, leverage } = args;
+  const absoluteSize = Math.abs(Number(positionSize));
+  const orderNotional = Number(marginPerOrder) * Number(leverage);
+  if (!(entryPrice > 0) || !(absoluteSize > 0) || !(orderNotional > 0)) {
+    return 0;
+  }
+
+  // Qty is rounded down to exchange step, so allow a small tolerance before
+  // deciding that the next grid tier is fully filled.
+  const effectiveOrders = (entryPrice * absoluteSize) / orderNotional;
+  return Math.max(0, Math.floor(effectiveOrders + 0.05));
 }
 
 function computeTrailingDistance(entryPrice: number, slPct: number): number {
@@ -493,6 +529,25 @@ function isExecutorManagedOrder(row: StoredOrderRow): boolean {
   return row.reason === "candidate" || row.reason === "final";
 }
 
+function parseExecutorOrderLinkId(value: unknown): { entryBatch: string | null; entrySlot: number | null } {
+  const text = String(value ?? "").trim();
+  if (!text) {
+    return { entryBatch: null, entrySlot: null };
+  }
+
+  const parts = text.split("_");
+  if (parts.length !== 5 || parts[0] !== EXECUTOR_ORDER_LINK_PREFIX) {
+    return { entryBatch: null, entrySlot: null };
+  }
+
+  const entryBatch = parts[3] || null;
+  const parsedSlot = Number(parts[4]);
+  return {
+    entryBatch,
+    entrySlot: Number.isInteger(parsedSlot) && parsedSlot > 0 ? parsedSlot : null,
+  };
+}
+
 function buildExecutorOrderLinkId(reason: ExecutionReason, symbol: string, batchTs: number, index: number): string {
   return `${EXECUTOR_ORDER_LINK_PREFIX}_${reason}_${symbol}_${batchTs}_${index}`;
 }
@@ -511,24 +566,71 @@ function computeShortEntryPrice(referencePrice: number, offsetPct: number): numb
   return referencePrice * (1 + (Math.max(0, offsetPct) / 100));
 }
 
+function computeShortGridEntryPrice(
+  firstEntryPrice: number,
+  averageEntryPrice: number,
+  gridStepPct: number,
+): number {
+  const stepMultiplier = 1 + (Math.max(0, gridStepPct) / 100);
+  const basePrice = averageEntryPrice > 0 ? averageEntryPrice : firstEntryPrice;
+  return basePrice * stepMultiplier;
+}
+
+function computePlannedShortGridEntryPrices(
+  firstEntryPrice: number,
+  gridStepPct: number,
+  ordersCount: number,
+): number[] {
+  if (!(firstEntryPrice > 0) || ordersCount <= 0) {
+    return [];
+  }
+
+  const prices = [firstEntryPrice];
+  let reciprocalPriceSum = 1 / firstEntryPrice;
+
+  for (let index = 1; index < ordersCount; index += 1) {
+    const averageEntryPrice = prices.length / reciprocalPriceSum;
+    const nextPrice = computeShortGridEntryPrice(
+      firstEntryPrice,
+      averageEntryPrice,
+      gridStepPct,
+    );
+    prices.push(nextPrice);
+    reciprocalPriceSum += 1 / nextPrice;
+  }
+
+  return prices;
+}
+
 function mergeStoredPositionRows(
   primary: StoredPositionRow,
   secondary: StoredPositionRow,
 ): StoredPositionRow {
+  const exchange =
+    primary.optimisticProtectionOnly && !secondary.optimisticProtectionOnly
+      ? secondary
+      : (!primary.optimisticProtectionOnly && secondary.optimisticProtectionOnly ? primary : primary);
+  const other = exchange === primary ? secondary : primary;
+  const protection =
+    primary.updatedAt >= secondary.updatedAt
+      ? primary
+      : secondary;
+
   return {
-    ...primary,
-    reason: primary.reason ?? secondary.reason,
-    value: primary.value ?? secondary.value,
-    pnl: primary.pnl ?? secondary.pnl,
-    tp: primary.tp ?? secondary.tp,
-    sl: primary.sl ?? secondary.sl,
-    trailingStop: primary.trailingStop ?? secondary.trailingStop,
-    side: primary.side ?? secondary.side,
-    size: primary.size ?? secondary.size,
-    entryPrice: primary.entryPrice ?? secondary.entryPrice,
-    markPrice: primary.markPrice ?? secondary.markPrice,
-    positionIdx: primary.positionIdx ?? secondary.positionIdx,
-    leverage: primary.leverage ?? secondary.leverage,
+    ...exchange,
+    reason: exchange.reason ?? other.reason,
+    value: exchange.value ?? other.value,
+    pnl: exchange.pnl ?? other.pnl,
+    tp: protection.tp ?? exchange.tp ?? other.tp,
+    sl: protection.sl ?? exchange.sl ?? other.sl,
+    trailingStop: protection.trailingStop ?? exchange.trailingStop ?? other.trailingStop,
+    side: exchange.side ?? other.side,
+    size: exchange.size ?? other.size,
+    entryPrice: exchange.entryPrice ?? other.entryPrice,
+    markPrice: exchange.markPrice ?? other.markPrice,
+    positionIdx: exchange.positionIdx ?? other.positionIdx,
+    leverage: exchange.leverage ?? other.leverage,
+    optimisticProtectionOnly: exchange.optimisticProtectionOnly && other.optimisticProtectionOnly,
     updatedAt: Math.max(primary.updatedAt, secondary.updatedAt),
   };
 }
@@ -699,6 +801,8 @@ class BybitPrivateExecutionStream {
         margin: row.margin,
         leverage: row.leverage,
         entryPrice: row.entryPrice,
+        entryBatch: row.entryBatch,
+        entrySlot: row.entrySlot,
         placedAt: row.placedAt,
         updatedAt: row.updatedAt,
       })),
@@ -1462,8 +1566,10 @@ class PrivateExecutionExecutorManager {
     const next = this.getOpenSymbolsForStream(stream);
     const prev = this.openSymbolsByMode[mode];
     const now = Date.now();
+    const closedSymbols: string[] = [];
     for (const symbol of prev) {
       if (!next.has(symbol)) {
+        closedSymbols.push(symbol);
         this.lastClosedAtByModeSymbol.set(this.getCooldownKey(mode, symbol), now);
         this.logger.info(
           { mode, symbol, closedAt: now },
@@ -1472,6 +1578,9 @@ class PrivateExecutionExecutorManager {
       }
     }
     this.openSymbolsByMode[mode] = next;
+    if (closedSymbols.length > 0) {
+      void this.cancelRemainingOrdersAfterClose(mode, closedSymbols);
+    }
   }
 
   private isCooldownActive(mode: ExecutionMode, symbol: string, settings: ExecutorSettings): boolean {
@@ -1764,9 +1873,59 @@ class PrivateExecutionExecutorManager {
     return canceled;
   }
 
+  private async cancelRemainingOrdersAfterClose(
+    mode: ExecutionMode,
+    symbols: string[],
+  ): Promise<void> {
+    const settings = this.activeSettings;
+    if (!executorStore.getState().running) return;
+    if (!settings || settings.mode !== mode) return;
+    if (symbols.length === 0) return;
+
+    const stream = this.getActiveStream(mode);
+    const restClient = stream.getRestClient();
+    if (!restClient || !restClient.hasCredentials()) return;
+
+    let changed = false;
+
+    for (const symbol of symbols) {
+      try {
+        const canceled = await this.cancelExecutorOrdersForSymbol(
+          stream,
+          restClient,
+          symbol,
+          "position_closed",
+        );
+        if (canceled > 0) {
+          changed = true;
+          this.logger.info(
+            { mode, symbol, canceledOrders: canceled },
+            "private execution executor canceled remaining entry orders after close",
+          );
+        }
+      } catch (error) {
+        this.logger.error(
+          {
+            mode,
+            symbol,
+            error: String((error as Error)?.message ?? error),
+          },
+          "private execution executor failed to cancel remaining entry orders after close",
+        );
+      }
+    }
+
+    if (changed) {
+      await stream.forceRefresh(`position_close_cancel_${mode}`, {
+        includeOrders: true,
+      });
+    }
+  }
+
   private async cancelStaleOrdersIfNeeded(reason: string): Promise<void> {
     const settings = this.activeSettings;
     if (!settings || !settings.cancelActivePositionOrders) return;
+    if (!(settings.orderAliveMin > 0)) return;
     const stream = this.getActiveStream(settings.mode);
     const restClient = stream.getRestClient();
     if (!restClient || !restClient.hasCredentials()) return;
@@ -1814,7 +1973,7 @@ class PrivateExecutionExecutorManager {
   ): Promise<{ ordersCount: number; marginPerOrder: number; orderLinkIds: string[] }> {
     const instrument = await this.getInstrumentSpec(args.settings.mode, restClient, args.symbol);
     const ordersCount = Math.max(1, Math.floor(Number(args.settings.gridOrdersCount) || 0));
-    const marginPerOrder = args.settings.maxUsdt / ordersCount;
+    const marginPerOrder = args.settings.maxUsdt;
     if (!(marginPerOrder > 0) || !(args.settings.leverage > 0)) {
       throw new Error("invalid_executor_order_budget");
     }
@@ -1827,12 +1986,23 @@ class PrivateExecutionExecutorManager {
 
     const createdOrderLinkIds: string[] = [];
     const batchTs = Date.now();
+    const firstEntryPrice = computeShortEntryPrice(
+      args.referencePrice,
+      args.settings.firstOrderOffsetPct,
+    );
+    const plannedEntryPrices = computePlannedShortGridEntryPrices(
+      firstEntryPrice,
+      args.settings.gridStepPct,
+      ordersCount,
+    );
 
     try {
       for (let index = 0; index < ordersCount; index += 1) {
-        const offsetPct = Number(args.settings.firstOrderOffsetPct) + index * Number(args.settings.gridStepPct);
-        const rawPrice = computeShortEntryPrice(args.referencePrice, offsetPct);
-        const price = roundNearestToStep(rawPrice, instrument.tickSize);
+        const plannedPrice = plannedEntryPrices[index];
+        if (!(plannedPrice != null && plannedPrice > 0)) {
+          throw new Error(`invalid_entry_price:${args.symbol}:${index + 1}`);
+        }
+        const price = roundNearestToStep(plannedPrice, instrument.tickSize);
         if (!(price > 0)) {
           throw new Error(`invalid_entry_price:${args.symbol}:${index + 1}`);
         }
@@ -1913,17 +2083,34 @@ class PrivateExecutionExecutorManager {
         continue;
       }
 
+      let filledGridOrders = 0;
+      let shouldSetStop = false;
+
       try {
         const positionIdx = resolvePositionIdx(position);
         const instrument = await this.getInstrumentSpec(settings.mode, restClient, position.symbol);
+        filledGridOrders = estimateFilledGridOrders({
+          entryPrice: Number(position.entryPrice),
+          positionSize: Number(position.size ?? 0),
+          marginPerOrder: settings.maxUsdt,
+          leverage: settings.leverage,
+        });
+        shouldSetStop = filledGridOrders >= Math.max(1, settings.gridOrdersCount);
         const targetTp = roundNearestToStep(
           computeTpPrice(Number(position.entryPrice), position.side, settings.tpPct),
           instrument.tickSize,
         );
-        const targetSl = roundNearestToStep(
-          computeSlPrice(Number(position.entryPrice), position.side, settings.slPct),
-          instrument.tickSize,
-        );
+        const targetSl = shouldSetStop
+          ? roundNearestToStep(
+            computeLossBoundStopPrice({
+              entryPrice: Number(position.entryPrice),
+              side: position.side,
+              positionSize: Number(position.size ?? 0),
+              maxLossUsdt: settings.maxUsdt * settings.leverage,
+            }),
+            instrument.tickSize,
+          )
+          : null;
 
         const trailingPresent = (position.trailingStop ?? null) != null;
         const tpMatches = sameWithinStep(position.tp ?? null, targetTp, instrument.tickSize);
@@ -1932,24 +2119,53 @@ class PrivateExecutionExecutorManager {
         const needsTpReset = (position.tp ?? null) != null && !tpMatches;
         const needsSlReset = (position.sl ?? null) != null && !slMatches;
         const needsTpSet = !tpMatches;
-        const needsSlSet = !slMatches;
+        const needsSlSet = targetSl != null && !slMatches;
 
         if (!needsTrailingClear && !needsTpReset && !needsSlReset && !needsTpSet && !needsSlSet) {
           continue;
         }
 
         attempted += 1;
+        const patchErrors: string[] = [];
+        const applyPatch = async (
+          patch: Record<string, unknown>,
+          errorLabel: string,
+        ): Promise<boolean> => {
+          try {
+            await restClient.setTradingStopLinear({
+              symbol: position.symbol,
+              positionIdx,
+              ...patch,
+            });
+            return true;
+          } catch (error) {
+            const message = String((error as Error)?.message ?? error);
+            patchErrors.push(`${errorLabel}: ${message}`);
+            this.logger.error(
+              {
+                mode: settings.mode,
+                reason,
+                symbol: position.symbol,
+                side: position.side,
+                positionIdx,
+                entryPrice: position.entryPrice,
+                filledGridOrders,
+                shouldSetStop,
+                patch,
+                error: message,
+              },
+              "private execution executor trading stop patch failed",
+            );
+            return false;
+          }
+        };
 
         if (needsTrailingClear) {
           this.logger.info(
             { mode: settings.mode, reason, symbol: position.symbol, positionIdx, patch: { trailingStop: "0" } },
             "private execution executor apply trading stop patch",
           );
-          await restClient.setTradingStopLinear({
-            symbol: position.symbol,
-            positionIdx,
-            trailingStop: "0",
-          });
+          await applyPatch({ trailingStop: "0" }, "trailing_clear");
         }
 
         if (needsTpReset) {
@@ -1957,12 +2173,7 @@ class PrivateExecutionExecutorManager {
             { mode: settings.mode, reason, symbol: position.symbol, positionIdx, patch: { tpslMode: "Full", takeProfit: "0" } },
             "private execution executor apply trading stop patch",
           );
-          await restClient.setTradingStopLinear({
-            symbol: position.symbol,
-            positionIdx,
-            tpslMode: "Full",
-            takeProfit: "0",
-          });
+          await applyPatch({ tpslMode: "Full", takeProfit: "0" }, "tp_reset");
         }
 
         if (needsSlReset) {
@@ -1970,12 +2181,7 @@ class PrivateExecutionExecutorManager {
             { mode: settings.mode, reason, symbol: position.symbol, positionIdx, patch: { tpslMode: "Full", stopLoss: "0" } },
             "private execution executor apply trading stop patch",
           );
-          await restClient.setTradingStopLinear({
-            symbol: position.symbol,
-            positionIdx,
-            tpslMode: "Full",
-            stopLoss: "0",
-          });
+          await applyPatch({ tpslMode: "Full", stopLoss: "0" }, "sl_reset");
         }
 
         if (needsTpSet) {
@@ -1983,13 +2189,10 @@ class PrivateExecutionExecutorManager {
             { mode: settings.mode, reason, symbol: position.symbol, positionIdx, patch: { tpslMode: "Full", takeProfit: formatForApi(targetTp), tpTriggerBy: "LastPrice" } },
             "private execution executor apply trading stop patch",
           );
-          await restClient.setTradingStopLinear({
-            symbol: position.symbol,
-            positionIdx,
-            tpslMode: "Full",
-            takeProfit: formatForApi(targetTp),
-            tpTriggerBy: "LastPrice",
-          });
+          await applyPatch(
+            { tpslMode: "Full", takeProfit: formatForApi(targetTp), tpTriggerBy: "LastPrice" },
+            "tp_set",
+          );
         }
 
         if (needsSlSet) {
@@ -1997,20 +2200,39 @@ class PrivateExecutionExecutorManager {
             { mode: settings.mode, reason, symbol: position.symbol, positionIdx, patch: { tpslMode: "Full", stopLoss: formatForApi(targetSl), slTriggerBy: "LastPrice" } },
             "private execution executor apply trading stop patch",
           );
-          await restClient.setTradingStopLinear({
-            symbol: position.symbol,
-            positionIdx,
-            tpslMode: "Full",
-            stopLoss: formatForApi(targetSl),
-            slTriggerBy: "LastPrice",
-          });
+          await applyPatch(
+            { tpslMode: "Full", stopLoss: formatForApi(targetSl), slTriggerBy: "LastPrice" },
+            "sl_set",
+          );
         }
 
-        stream.applyOptimisticProtection(position.key, {
-          tp: targetTp,
-          sl: targetSl,
-          trailingStop: null,
-        });
+        if (patchErrors.length === 0) {
+          stream.applyOptimisticProtection(position.key, {
+            tp: targetTp,
+            sl: targetSl,
+            trailingStop: null,
+          });
+          continue;
+        }
+
+        failed += 1;
+        this.logger.error(
+          {
+            mode: settings.mode,
+            reason,
+            symbol: position.symbol,
+            side: position.side,
+            positionIdx: resolvePositionIdx(position),
+            entryPrice: position.entryPrice,
+            filledGridOrders,
+            shouldSetStop,
+            tp: position.tp,
+            sl: position.sl,
+            trailingStop: position.trailingStop,
+            error: patchErrors.join("; "),
+          },
+          "private execution executor full reconcile failed",
+        );
       } catch (error) {
         failed += 1;
         const message = String((error as Error)?.message ?? error);
@@ -2022,6 +2244,8 @@ class PrivateExecutionExecutorManager {
             side: position.side,
             positionIdx: resolvePositionIdx(position),
             entryPrice: position.entryPrice,
+            filledGridOrders,
+            shouldSetStop,
             tp: position.tp,
             sl: position.sl,
             trailingStop: position.trailingStop,

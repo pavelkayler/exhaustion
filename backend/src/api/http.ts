@@ -5,6 +5,12 @@ import { BybitRealRestClient } from "../bybit/BybitRealRestClient.js";
 import { runtime } from "../runtime/runtime.js";
 import { configStore } from "../runtime/configStore.js";
 import {
+  buildBotConfigPatchFromThresholds,
+  extractSignalThresholds,
+  normalizeSignalThresholds,
+  signalPresetStore,
+} from "../runtime/signalPresetStore.js";
+import {
   awaitAllStreamsConnected,
   requestStreamLifecycleSync,
   submitManualTestOrder,
@@ -68,6 +74,15 @@ function extractOrderLinkId(symbol: string, key: string): string | null {
   if (!key.startsWith(prefix)) return null;
   const suffix = key.slice(prefix.length).trim();
   return suffix || null;
+}
+
+function getSignalPresetPayload() {
+  const currentConfig = configStore.get();
+  return {
+    selectedPresetId: currentConfig.selectedBotPresetId ?? null,
+    currentThresholds: extractSignalThresholds(currentConfig.botConfig),
+    presets: signalPresetStore.getAll(),
+  };
 }
 
 export function setShutdownHandler(handler: (() => Promise<void> | void) | null) {
@@ -324,6 +339,95 @@ export function registerHttpRoutes(app: FastifyInstance) {
         universeSelectedId: next.universe.selectedId ?? "",
       },
     };
+  });
+
+  app.get("/api/signals/presets", async () => {
+    return getSignalPresetPayload();
+  });
+
+  app.post("/api/signals/presets/save", async (req, reply) => {
+    try {
+      const body = ((req.body ?? {}) as Record<string, unknown>) ?? {};
+      const saved = signalPresetStore.save({
+        id: body.id == null ? null : String(body.id),
+        name: String(body.name ?? "").trim(),
+        thresholds: body.thresholds,
+      });
+      return {
+        ...getSignalPresetPayload(),
+        savedPreset: saved,
+      };
+    } catch (error) {
+      reply.code(400);
+      return { error: String((error as Error)?.message ?? error) };
+    }
+  });
+
+  app.post("/api/signals/presets/delete", async (req, reply) => {
+    try {
+      const body = ((req.body ?? {}) as Record<string, unknown>) ?? {};
+      const id = String(body.id ?? "").trim();
+      const result = signalPresetStore.delete(id);
+      const currentSelectedPresetId = configStore.get().selectedBotPresetId ?? null;
+      if (result.deleted && currentSelectedPresetId === id) {
+        configStore.update({ selectedBotPresetId: "default" });
+        configStore.persist();
+      }
+      return {
+        ...getSignalPresetPayload(),
+        deleted: result.deleted,
+      };
+    } catch (error) {
+      reply.code(400);
+      return { error: String((error as Error)?.message ?? error) };
+    }
+  });
+
+  app.post("/api/signals/presets/apply", async (req, reply) => {
+    try {
+      const body = ((req.body ?? {}) as Record<string, unknown>) ?? {};
+      const thresholds = normalizeSignalThresholds(body.thresholds, configStore.get().botConfig);
+      const selectedPresetId = String(body.selectedPresetId ?? "").trim() || "custom";
+      const wasRunning = runtime.getStatus().sessionState !== "STOPPED";
+
+      if (selectedPresetId !== "custom") {
+        const selectedPreset = signalPresetStore.getById(selectedPresetId);
+        if (selectedPreset) {
+          signalPresetStore.save({
+            id: selectedPreset.id,
+            name: selectedPreset.name,
+            thresholds,
+          });
+        }
+      }
+
+      if (wasRunning) {
+        await runtime.stop("signal_preset_apply");
+      }
+
+      const nextConfig = configStore.update({
+        selectedBotPresetId: selectedPresetId,
+        botConfig: buildBotConfigPatchFromThresholds(thresholds),
+      });
+      configStore.persist();
+
+      requestStreamLifecycleSync();
+
+      return {
+        ...getSignalPresetPayload(),
+        currentThresholds: thresholds,
+        config: nextConfig,
+        status: runtime.getStatus(),
+        stopped: wasRunning,
+        requiresManualStart: true,
+      };
+    } catch (error) {
+      reply.code(400);
+      return {
+        error: String((error as Error)?.message ?? error),
+        status: runtime.getStatus(),
+      };
+    }
   });
 
   app.post("/api/manual-test-order", async (req, reply) => {

@@ -5,10 +5,19 @@ import { useSessionRuntime } from "../../features/session/hooks/useSessionRuntim
 import { useWsFeed } from "../../features/ws/hooks/useWsFeed";
 import type {
   LogEvent,
+  SignalPreset,
+  SignalThresholds,
   ShortOiSpikeWatchlistRecord,
   SymbolRow,
 } from "../../shared/types/domain";
 import { formatCompactNumber } from "./formatCompactNumber";
+import {
+  applySignalPreset,
+  deleteSignalPreset,
+  fetchSignalPresets,
+  saveSignalPreset,
+} from "./api/signalPresetsApi";
+import { SignalPresetEditorCard } from "./SignalPresetEditorCard";
 
 const SHORT_SIGNAL_EVENT_TYPES = new Set([
   "SHORT_SIGNAL_STAGE",
@@ -86,10 +95,139 @@ export function ShortSignalsPage() {
   const { status, busy, start, stop, pause, resume, canStart, canStop, canPause, canResume } =
     useSessionRuntime();
   const [hideRejected, setHideRejected] = useState(false);
+  const [presetLoading, setPresetLoading] = useState(true);
+  const [presetError, setPresetError] = useState<string | null>(null);
+  const [presetBusyAction, setPresetBusyAction] = useState<"none" | "save" | "delete" | "apply">("none");
+  const [presets, setPresets] = useState<SignalPreset[]>([]);
+  const [selectedPresetId, setSelectedPresetId] = useState<string | null>(null);
+  const [presetName, setPresetName] = useState("");
+  const [draftThresholds, setDraftThresholds] = useState<SignalThresholds | null>(null);
 
   useEffect(() => {
     requestEventsTail(100);
   }, [requestEventsTail]);
+
+  useEffect(() => {
+    let active = true;
+    const load = async () => {
+      setPresetLoading(true);
+      setPresetError(null);
+      try {
+        const response = await fetchSignalPresets();
+        if (!active) return;
+        setPresets(response.presets);
+        setSelectedPresetId(response.selectedPresetId ?? response.presets[0]?.id ?? null);
+        setDraftThresholds(response.currentThresholds);
+        const selectedPreset = response.presets.find((preset) => preset.id === response.selectedPresetId) ?? null;
+        setPresetName(selectedPreset?.name ?? "Custom");
+      } catch (error) {
+        if (!active) return;
+        setPresetError(String((error as Error)?.message ?? error));
+      } finally {
+        if (active) setPresetLoading(false);
+      }
+    };
+    void load();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  function applyPresetResponse(response: {
+    presets: SignalPreset[];
+    selectedPresetId: string | null;
+    currentThresholds: SignalThresholds;
+  }) {
+    setPresets(response.presets);
+    setSelectedPresetId(response.selectedPresetId ?? response.presets[0]?.id ?? null);
+    setDraftThresholds(response.currentThresholds);
+    const selectedPreset = response.presets.find((preset) => preset.id === response.selectedPresetId) ?? null;
+    setPresetName(selectedPreset?.name ?? presetName);
+  }
+
+  const handlePresetSelect = (presetId: string) => {
+    const selectedPreset = presets.find((preset) => preset.id === presetId) ?? null;
+    setSelectedPresetId(selectedPreset?.id ?? null);
+    setPresetName(selectedPreset?.name ?? "");
+    setDraftThresholds(selectedPreset ? structuredClone(selectedPreset.thresholds) : draftThresholds);
+  };
+
+  const handleThresholdChange = (
+    section: keyof SignalThresholds,
+    field: string,
+    value: number | boolean | null,
+  ) => {
+    setDraftThresholds((prev) => {
+      if (!prev) return prev;
+      const next = structuredClone(prev) as SignalThresholds & Record<string, unknown>;
+      const sectionState = next[section] as Record<string, unknown>;
+      sectionState[field] = value;
+      return next;
+    });
+  };
+
+  const handleSavePreset = async () => {
+    if (!draftThresholds) return;
+    const trimmedName = presetName.trim();
+    if (!trimmedName) {
+      setPresetError("Preset name is required.");
+      return;
+    }
+
+    setPresetBusyAction("save");
+    setPresetError(null);
+    try {
+      const canOverwrite = selectedPresetId != null && selectedPresetId !== "default";
+      const response = await saveSignalPreset({
+        id: canOverwrite ? selectedPresetId : null,
+        name: trimmedName,
+        thresholds: draftThresholds,
+      });
+      setPresets(response.presets);
+      const savedPreset = response.savedPreset ?? null;
+      setSelectedPresetId(savedPreset?.id ?? selectedPresetId);
+      setPresetName(savedPreset?.name ?? trimmedName);
+    } catch (error) {
+      setPresetError(String((error as Error)?.message ?? error));
+    } finally {
+      setPresetBusyAction("none");
+    }
+  };
+
+  const handleDeletePreset = async () => {
+    if (!selectedPresetId || selectedPresetId === "default") return;
+    setPresetBusyAction("delete");
+    setPresetError(null);
+    try {
+      const response = await deleteSignalPreset(selectedPresetId);
+      applyPresetResponse(response);
+      const nextSelected = response.presets.find((preset) => preset.id === response.selectedPresetId)
+        ?? response.presets.find((preset) => preset.id === "default")
+        ?? null;
+      setPresetName(nextSelected?.name ?? "Default");
+    } catch (error) {
+      setPresetError(String((error as Error)?.message ?? error));
+    } finally {
+      setPresetBusyAction("none");
+    }
+  };
+
+  const handleApplyPreset = async () => {
+    if (!draftThresholds) return;
+    setPresetBusyAction("apply");
+    setPresetError(null);
+    try {
+      const response = await applySignalPreset({
+        selectedPresetId,
+        thresholds: draftThresholds,
+      });
+      applyPresetResponse(response);
+    } catch (error) {
+      setPresetError(String((error as Error)?.message ?? error));
+    } finally {
+      setPresetBusyAction("none");
+    }
+  };
 
   const signalEventCountBySymbol = useMemo(() => {
     const counts = new Map<string, number>();
@@ -200,6 +338,24 @@ export function ShortSignalsPage() {
         </Card>
 
         <Row className="g-3">
+          <Col xs={12}>
+            <SignalPresetEditorCard
+              presets={presets}
+              selectedPresetId={selectedPresetId}
+              presetName={presetName}
+              thresholds={draftThresholds}
+              loading={presetLoading}
+              busyAction={presetBusyAction}
+              error={presetError}
+              onPresetSelect={handlePresetSelect}
+              onPresetNameChange={setPresetName}
+              onThresholdChange={handleThresholdChange}
+              onSave={() => void handleSavePreset()}
+              onDelete={() => void handleDeletePreset()}
+              onApply={() => void handleApplyPreset()}
+            />
+          </Col>
+
           <Col xl={6}>
             <Card className="genesis-card h-100">
               <Card.Header>Recent Signals</Card.Header>

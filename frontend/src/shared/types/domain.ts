@@ -57,6 +57,11 @@ export type SymbolRow = {
   shortOiMove5mPct?: number | null;
   shortOiMove15mPct?: number | null;
   shortOiMove1hPct?: number | null;
+  paperSide?: string | null;
+  paperEntryPrice?: number | null;
+  paperTpPrice?: number | null;
+  paperSlPrice?: number | null;
+  paperQty?: number | null;
   [key: string]: unknown;
 };
 
@@ -71,6 +76,7 @@ export type RuntimeConfig = {
   selectedBotId?: string;
   selectedBotPresetId?: string;
   selectedExecutionProfileId?: string;
+  botConfig?: Record<string, unknown>;
   universe: {
     selectedId: string;
     symbols: string[];
@@ -96,12 +102,86 @@ export type ConfigResponse = {
   } | null;
 };
 
+export type SignalThresholds = {
+  candidate: {
+    minPriceMove1mPct: number;
+    minPriceMove3mPct: number;
+    minPriceMove5mPct: number;
+    minPriceMove15mPct: number;
+    minVolumeBurstRatio: number;
+    minTurnoverBurstRatio: number;
+    maxUniverseRank: number;
+    minTurnover24hUsd: number;
+    maxTurnover24hUsd: number | null;
+    minOpenInterestValueUsd: number;
+    minTrades1m: number;
+    maxSpreadBps: number;
+    minDistanceFromLow24hPct: number;
+    minNearDepthUsd: number;
+    candidateScoreMin: number;
+  };
+  derivatives: {
+    minOiMove1mPct: number;
+    minOiMove5mPct: number;
+    minOiAccelerationPct: number;
+    minFundingAbsPct: number;
+    useLongShortRatio: boolean;
+    minLongShortRatio: number;
+    longShortRatioWeight: number;
+    minShortLiquidationUsd60s: number;
+    minShortLiquidationBurstRatio60s: number;
+    minShortLiquidationImbalance60s: number;
+    derivativesScoreMin: number;
+  };
+  exhaustion: {
+    maxPriceContinuation30sPct: number;
+    maxPriceContinuation1mPct: number;
+    maxOiAccelerationPct: number;
+    minNegativeCvdDelta: number;
+    minNegativeCvdImbalance: number;
+    exhaustionScoreMin: number;
+  };
+  microstructure: {
+    minAskToBidDepthRatio: number;
+    minSellSideImbalance: number;
+    maxNearestAskWallBps: number;
+    minNearestBidWallBps: number;
+    maxSpreadBps: number;
+    minNearDepthUsd: number;
+    microstructureScoreMin: number;
+  };
+  observe: {
+    totalScoreMin: number;
+  };
+};
+
+export type SignalPreset = {
+  id: string;
+  name: string;
+  thresholds: SignalThresholds;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type SignalPresetsResponse = {
+  selectedPresetId: string | null;
+  currentThresholds: SignalThresholds;
+  presets: SignalPreset[];
+  savedPreset?: SignalPreset | null;
+  deleted?: boolean;
+  config?: RuntimeConfig;
+  status?: StatusResponse;
+  restarted?: boolean;
+};
+
 export type ManualTestOrderResponse = {
   ok?: boolean;
   accepted: boolean;
   message: string;
   reason?: string;
   tracked?: boolean;
+  retCode?: number | null;
+  retMsg?: string | null;
   row?: SymbolRow;
   [key: string]: unknown;
 };

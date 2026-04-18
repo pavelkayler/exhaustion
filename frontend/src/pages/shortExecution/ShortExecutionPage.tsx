@@ -122,7 +122,11 @@ export function ShortExecutionPage() {
               orderPendingKeys={executionFeed.orderPendingKeys}
               orderFailedKeys={executionFeed.orderFailedKeys}
               orderActionError={executionFeed.orderActionError}
-              onCancel={(key) => void executionFeed.cancelOrder(key)}
+              onCancel={(keys) => {
+                for (const key of keys) {
+                  void executionFeed.cancelOrder(key);
+                }
+              }}
             />
           </Col>
 

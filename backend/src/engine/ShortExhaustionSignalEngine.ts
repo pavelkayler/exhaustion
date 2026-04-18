@@ -425,7 +425,7 @@ export class ShortExhaustionSignalEngine {
       minVolumeBurstRatio: minCeil(this.cfg.candidate.minVolumeBurstRatio, 1.65),
       minTurnoverBurstRatio: minCeil(this.cfg.candidate.minTurnoverBurstRatio, 1.65),
       maxUniverseRank: maxFloor(this.cfg.candidate.maxUniverseRank, 8),
-      minTurnover24hUsd: minCeil(this.cfg.candidate.minTurnover24hUsd, 8_000_000),
+      minTurnover24hUsd: Math.max(0, this.cfg.candidate.minTurnover24hUsd),
       minOpenInterestValueUsd: minCeil(this.cfg.candidate.minOpenInterestValueUsd, 2_000_000),
       minTrades1m: minCeil(this.cfg.candidate.minTrades1m, 14),
       maxSpreadBps: maxFloor(this.cfg.candidate.maxSpreadBps, 30),

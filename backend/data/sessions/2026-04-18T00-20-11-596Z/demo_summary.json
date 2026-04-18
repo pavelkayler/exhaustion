@@ -1,0 +1,16 @@
+{
+  "sessionId": "2026-04-18T00-20-11-596Z",
+  "executionMode": "demo",
+  "startedAtMs": 1776471612414,
+  "endedAtMs": 1776471632707,
+  "startBalanceUsdt": 1017.90352218,
+  "endBalanceUsdt": null,
+  "deltaUsdt": null,
+  "openPositionsAtEnd": 2,
+  "openOrdersAtEnd": 6,
+  "pendingEntriesAtEnd": 0,
+  "tradesCount": 0,
+  "realizedPnlUsdt": 0,
+  "feesUsdt": 0,
+  "lastExecTimeMs": null
+}

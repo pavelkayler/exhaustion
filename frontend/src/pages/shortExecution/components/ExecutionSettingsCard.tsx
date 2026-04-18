@@ -98,7 +98,7 @@ export function ExecutionSettingsCard({
           </Col>
           <Col md={4}>
             <Form.Group>
-              <Form.Label>Max USDT</Form.Label>
+              <Form.Label>Margin</Form.Label>
               <Form.Control
                 type="number"
                 step="any"
@@ -114,6 +114,7 @@ export function ExecutionSettingsCard({
                 type="number"
                 step="any"
                 value={settings.leverage}
+                disabled
                 onChange={(event) => onUpdateNumber("leverage", event.target.value)}
               />
             </Form.Group>
@@ -125,6 +126,7 @@ export function ExecutionSettingsCard({
                 type="number"
                 step="any"
                 value={settings.tpPct}
+                disabled
                 onChange={(event) => onUpdateNumber("tpPct", event.target.value)}
               />
             </Form.Group>
@@ -136,6 +138,7 @@ export function ExecutionSettingsCard({
                 type="number"
                 step="any"
                 value={settings.slPct}
+                disabled
                 onChange={(event) => onUpdateNumber("slPct", event.target.value)}
               />
             </Form.Group>
@@ -145,6 +148,7 @@ export function ExecutionSettingsCard({
               <Form.Label>Exit</Form.Label>
               <Form.Select
                 value={settings.exit}
+                disabled
                 onChange={(event) =>
                   onExitChange(
                     event.target.value === "partial_and_trailing"
@@ -181,6 +185,7 @@ export function ExecutionSettingsCard({
                 type="number"
                 step="1"
                 value={settings.gridOrdersCount}
+                disabled
                 onChange={(event) => onUpdateNumber("gridOrdersCount", event.target.value)}
               />
             </Form.Group>
@@ -203,6 +208,7 @@ export function ExecutionSettingsCard({
                 type="number"
                 step="1"
                 value={settings.orderAliveMin}
+                disabled
                 onChange={(event) => onUpdateNumber("orderAliveMin", event.target.value)}
               />
             </Form.Group>
@@ -214,6 +220,7 @@ export function ExecutionSettingsCard({
                 type="number"
                 step="1"
                 value={settings.cooldownMin}
+                disabled
                 onChange={(event) => onUpdateNumber("cooldownMin", event.target.value)}
               />
             </Form.Group>

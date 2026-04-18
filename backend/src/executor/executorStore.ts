@@ -44,6 +44,16 @@ export type ExecutorPersistedState = {
 };
 
 const EXECUTOR_STATE_FILE_PATH = path.resolve(process.cwd(), "data", "execution-executor.json");
+const FIXED_EXECUTOR_LEVERAGE = 10;
+const FIXED_EXECUTOR_TP_PCT = 5;
+const FIXED_EXECUTOR_GRID_ORDERS_COUNT = 3;
+const FIXED_EXECUTOR_GRID_STEP_PCT = 15;
+const FIXED_EXECUTOR_ORDER_ALIVE_MIN = 0;
+const FIXED_EXECUTOR_COOLDOWN_MIN = 5;
+const FIXED_EXECUTOR_EXIT_MODE: ExecutorExitMode = "full";
+const FIXED_EXECUTOR_SL_PCT = Number(
+  (100 / FIXED_EXECUTOR_GRID_ORDERS_COUNT).toFixed(4),
+);
 
 function deepClone<T>(value: T): T {
   return structuredClone(value);
@@ -94,28 +104,44 @@ function normalizeExitMode(value: unknown, fallback: ExecutorExitMode = "full"):
 export const DEFAULT_EXECUTOR_SETTINGS: ExecutorSettings = {
   mode: "demo",
   maxUsdt: 100,
-  leverage: 10,
-  tpPct: 3,
-  slPct: 6,
+  leverage: FIXED_EXECUTOR_LEVERAGE,
+  tpPct: FIXED_EXECUTOR_TP_PCT,
+  slPct: FIXED_EXECUTOR_SL_PCT,
   firstOrderOffsetPct: 0.6,
-  gridOrdersCount: 2,
-  gridStepPct: 1.2,
-  orderAliveMin: 2,
-  cooldownMin: 20,
+  gridOrdersCount: FIXED_EXECUTOR_GRID_ORDERS_COUNT,
+  gridStepPct: FIXED_EXECUTOR_GRID_STEP_PCT,
+  orderAliveMin: FIXED_EXECUTOR_ORDER_ALIVE_MIN,
+  cooldownMin: FIXED_EXECUTOR_COOLDOWN_MIN,
   trackCandidateSignalsForResearch: false,
   takeCandidateSignalsInLiveExecution: true,
   takeFinalSignals: true,
   cancelActivePositionOrders: true,
-  exit: "full",
+  exit: FIXED_EXECUTOR_EXIT_MODE,
 };
 
 function normalizeOrderAliveMin(source: Record<string, unknown>): number {
   if (Object.prototype.hasOwnProperty.call(source, "orderAliveMin")) {
-    return Math.max(1, Math.floor(readFiniteNumber(source.orderAliveMin, DEFAULT_EXECUTOR_SETTINGS.orderAliveMin)));
+    return Math.max(
+      0,
+      Math.floor(
+        readFiniteNumber(
+          source.orderAliveMin,
+          DEFAULT_EXECUTOR_SETTINGS.orderAliveMin,
+        ),
+      ),
+    );
   }
   if (Object.prototype.hasOwnProperty.call(source, "staleSec")) {
-    const legacySeconds = Math.max(1, Math.floor(readFiniteNumber(source.staleSec, DEFAULT_EXECUTOR_SETTINGS.orderAliveMin * 60)));
-    return Math.max(1, Math.round(legacySeconds / 60));
+    const legacySeconds = Math.max(
+      0,
+      Math.floor(
+        readFiniteNumber(
+          source.staleSec,
+          DEFAULT_EXECUTOR_SETTINGS.orderAliveMin * 60,
+        ),
+      ),
+    );
+    return Math.max(0, Math.round(legacySeconds / 60));
   }
   return DEFAULT_EXECUTOR_SETTINGS.orderAliveMin;
 }
@@ -125,20 +151,20 @@ function normalizeSettings(raw: unknown): ExecutorSettings {
   return {
     mode: normalizeMode(source.mode, DEFAULT_EXECUTOR_SETTINGS.mode),
     maxUsdt: Math.max(0, readFiniteNumber(source.maxUsdt, DEFAULT_EXECUTOR_SETTINGS.maxUsdt)),
-    leverage: Math.max(1, readFiniteNumber(source.leverage, DEFAULT_EXECUTOR_SETTINGS.leverage)),
-    tpPct: Math.max(0, readFiniteNumber(source.tpPct, DEFAULT_EXECUTOR_SETTINGS.tpPct)),
-    slPct: Math.max(0, readFiniteNumber(source.slPct, DEFAULT_EXECUTOR_SETTINGS.slPct)),
+    leverage: FIXED_EXECUTOR_LEVERAGE,
+    tpPct: FIXED_EXECUTOR_TP_PCT,
+    slPct: FIXED_EXECUTOR_SL_PCT,
     firstOrderOffsetPct: Math.max(
       0,
       readFiniteNumber(source.firstOrderOffsetPct, DEFAULT_EXECUTOR_SETTINGS.firstOrderOffsetPct),
     ),
-    gridOrdersCount: Math.max(
+    gridOrdersCount: FIXED_EXECUTOR_GRID_ORDERS_COUNT,
+    gridStepPct: Math.max(
       0,
-      Math.floor(readFiniteNumber(source.gridOrdersCount, DEFAULT_EXECUTOR_SETTINGS.gridOrdersCount)),
+      readFiniteNumber(source.gridStepPct, DEFAULT_EXECUTOR_SETTINGS.gridStepPct),
     ),
-    gridStepPct: Math.max(0, readFiniteNumber(source.gridStepPct, DEFAULT_EXECUTOR_SETTINGS.gridStepPct)),
-    orderAliveMin: normalizeOrderAliveMin(source),
-    cooldownMin: Math.max(0, Math.floor(readFiniteNumber(source.cooldownMin, DEFAULT_EXECUTOR_SETTINGS.cooldownMin))),
+    orderAliveMin: FIXED_EXECUTOR_ORDER_ALIVE_MIN,
+    cooldownMin: FIXED_EXECUTOR_COOLDOWN_MIN,
     trackCandidateSignalsForResearch: readBoolean(
       source.trackCandidateSignalsForResearch,
       DEFAULT_EXECUTOR_SETTINGS.trackCandidateSignalsForResearch,
@@ -152,7 +178,7 @@ function normalizeSettings(raw: unknown): ExecutorSettings {
       source.cancelActivePositionOrders,
       DEFAULT_EXECUTOR_SETTINGS.cancelActivePositionOrders,
     ),
-    exit: normalizeExitMode(source.exit, DEFAULT_EXECUTOR_SETTINGS.exit),
+    exit: FIXED_EXECUTOR_EXIT_MODE,
   };
 }
 

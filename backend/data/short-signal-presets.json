@@ -1,0 +1,120 @@
+{
+  "presets": [
+    {
+      "id": "default",
+      "name": "Default",
+      "thresholds": {
+        "candidate": {
+          "minPriceMove1mPct": 0.8,
+          "minPriceMove3mPct": 1.8,
+          "minPriceMove5mPct": 3,
+          "minPriceMove15mPct": 5,
+          "minVolumeBurstRatio": 2,
+          "minTurnoverBurstRatio": 2,
+          "maxUniverseRank": 5,
+          "minTurnover24hUsd": 200000,
+          "maxTurnover24hUsd": null,
+          "minOpenInterestValueUsd": 3000000,
+          "minTrades1m": 25,
+          "maxSpreadBps": 25,
+          "minDistanceFromLow24hPct": 5,
+          "minNearDepthUsd": 20000,
+          "candidateScoreMin": 1.25
+        },
+        "derivatives": {
+          "minOiMove1mPct": 0.35,
+          "minOiMove5mPct": 1.2,
+          "minOiAccelerationPct": 0.05,
+          "minFundingAbsPct": 0.01,
+          "useLongShortRatio": false,
+          "minLongShortRatio": 1.1,
+          "longShortRatioWeight": 0.12,
+          "minShortLiquidationUsd60s": 25000,
+          "minShortLiquidationBurstRatio60s": 1.5,
+          "minShortLiquidationImbalance60s": 0.2,
+          "derivativesScoreMin": 0.85
+        },
+        "exhaustion": {
+          "maxPriceContinuation30sPct": 0.3,
+          "maxPriceContinuation1mPct": 0.9,
+          "maxOiAccelerationPct": 0.15,
+          "minNegativeCvdDelta": 1,
+          "minNegativeCvdImbalance": 0.05,
+          "exhaustionScoreMin": 0.7
+        },
+        "microstructure": {
+          "minAskToBidDepthRatio": 1.05,
+          "minSellSideImbalance": 0.04,
+          "maxNearestAskWallBps": 12,
+          "minNearestBidWallBps": 8,
+          "maxSpreadBps": 35,
+          "minNearDepthUsd": 15000,
+          "microstructureScoreMin": 0.55
+        },
+        "observe": {
+          "totalScoreMin": 2.75
+        }
+      },
+      "createdAt": 1776469817431,
+      "updatedAt": 1776471687155
+    },
+    {
+      "id": "preset_1776470192269",
+      "name": "200k",
+      "thresholds": {
+        "candidate": {
+          "minPriceMove1mPct": 0.8,
+          "minPriceMove3mPct": 1.8,
+          "minPriceMove5mPct": 3,
+          "minPriceMove15mPct": 5,
+          "minVolumeBurstRatio": 2,
+          "minTurnoverBurstRatio": 2,
+          "maxUniverseRank": 5,
+          "minTurnover24hUsd": 200000,
+          "maxTurnover24hUsd": null,
+          "minOpenInterestValueUsd": 3000000,
+          "minTrades1m": 25,
+          "maxSpreadBps": 25,
+          "minDistanceFromLow24hPct": 5,
+          "minNearDepthUsd": 20000,
+          "candidateScoreMin": 1.25
+        },
+        "derivatives": {
+          "minOiMove1mPct": 0.35,
+          "minOiMove5mPct": 1.2,
+          "minOiAccelerationPct": 0.05,
+          "minFundingAbsPct": 0.01,
+          "useLongShortRatio": false,
+          "minLongShortRatio": 1.1,
+          "longShortRatioWeight": 0.12,
+          "minShortLiquidationUsd60s": 25000,
+          "minShortLiquidationBurstRatio60s": 1.5,
+          "minShortLiquidationImbalance60s": 0.2,
+          "derivativesScoreMin": 0.85
+        },
+        "exhaustion": {
+          "maxPriceContinuation30sPct": 0.3,
+          "maxPriceContinuation1mPct": 0.9,
+          "maxOiAccelerationPct": 0.15,
+          "minNegativeCvdDelta": 1,
+          "minNegativeCvdImbalance": 0.05,
+          "exhaustionScoreMin": 0.7
+        },
+        "microstructure": {
+          "minAskToBidDepthRatio": 1.05,
+          "minSellSideImbalance": 0.04,
+          "maxNearestAskWallBps": 12,
+          "minNearestBidWallBps": 8,
+          "maxSpreadBps": 35,
+          "minNearDepthUsd": 15000,
+          "microstructureScoreMin": 0.55
+        },
+        "observe": {
+          "totalScoreMin": 2.75
+        }
+      },
+      "createdAt": 1776470192269,
+      "updatedAt": 1776471718894
+    }
+  ]
+}
