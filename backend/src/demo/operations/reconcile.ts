@@ -2,6 +2,7 @@ import type { BybitDemoRestClient } from "../../bybit/BybitDemoRestClient.js";
 import type { EventLogger } from "../../logging/EventLogger.js";
 import type { PaperSide } from "../../paper/PaperBroker.js";
 import { applyGlobalRearmCooldown } from "../../runtime/rearmPolicy.js";
+import { resolveDemoReconcileCloseState } from "../demoCloseUtils.js";
 import type { PendingEntry, SymbolState } from "../types.js";
 
 type ReconcileDemoBrokerDeps = {
@@ -149,9 +150,24 @@ export async function reconcileDemoBroker(deps: ReconcileDemoBrokerDeps): Promis
     }
     state.pendingEntries = remainingPending;
 
-    if (state.positionOpen && serverPositions.length === 0) {
+    const reconcileClose = resolveDemoReconcileCloseState({
+      positionOpen: state.positionOpen,
+      serverPositionsCount: serverPositions.length,
+      missingSinceMs: state.missingPositionSinceMs,
+      nowMs,
+    });
+    state.missingPositionSinceMs = reconcileClose.nextMissingSinceMs;
+
+    if (reconcileClose.confirmed) {
       if (!deps.isRunningLifecycle(deps.token)) return;
-      deps.logger.log({ ts: nowMs, type: deps.eventType("POSITION_CLOSE"), symbol, payload: { reason: "UNKNOWN" } });
+      const reason = (
+        state.lastClosedAtMs != null
+        && (nowMs - state.lastClosedAtMs) <= 30_000
+        && state.lastCloseType != null
+      )
+        ? state.lastCloseType
+        : "RECONCILE_CONFIRMED";
+      deps.logger.log({ ts: nowMs, type: deps.eventType("POSITION_CLOSE"), symbol, payload: { reason } });
       deps.applyAggregatedServerPositions(symbol, []);
       state.cooldownUntil = applyGlobalRearmCooldown(state.cooldownUntil, nowMs);
     } else if (serverPositions.length > 0) {

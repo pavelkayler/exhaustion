@@ -489,7 +489,6 @@ export class ShortExhaustionSignalEngine {
     score += scoreRatio(input.openInterestValue, thresholds.minOpenInterestValueUsd, 1.35) * 0.05;
     score += scoreRatio(input.trades1m, thresholds.minTrades1m, 1.35) * 0.03;
     score += inverseRatio(input.spreadBps, thresholds.maxSpreadBps, 1.4) * 0.015;
-    score += scoreRatio(input.orderbook.totalDepthNearUsd, thresholds.minNearDepthUsd, 1.5) * 0.015;
 
     if (hasPriceImpulse) reasons.push("candidate:price_impulse");
     if (turnoverBurst >= thresholds.minTurnoverBurstRatio || volumeBurst >= thresholds.minVolumeBurstRatio || strongPriceImpulse) {
@@ -752,11 +751,11 @@ export class ShortExhaustionSignalEngine {
       if (hardRejectReasons.length > 0 || biasLabel === "SQUEEZE_RISK") {
         return { advisoryVerdict: "NO_TRADE", advisoryReason: hardRejectReasons[0] ?? suppressionReasons[0] ?? "candidate_too_weak" };
       }
+      if (!weakSuppression && derivativesScore >= 0.58 && totalScore >= 1.7) {
+        return { advisoryVerdict: "TRADEABLE", advisoryReason: "candidate_fast_scalp_setup" };
+      }
       if (isLiquidityFloorCandidate && derivativesWeak && totalScore >= 1.35) {
         return { advisoryVerdict: "OBSERVE_ONLY", advisoryReason: "liquidity_floor_scalp_candidate" };
-      }
-      if (!weakSuppression && derivativesScore >= 0.58 && exhaustionScore >= 0.24 && totalScore >= 1.7) {
-        return { advisoryVerdict: "OBSERVE_ONLY", advisoryReason: "candidate_fast_scalp_setup" };
       }
       if (isLiquidityFloorCandidate && totalScore >= 1.55) {
         return { advisoryVerdict: "OBSERVE_ONLY", advisoryReason: "candidate_needs_one_more_push" };

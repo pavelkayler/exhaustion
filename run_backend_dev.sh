@@ -40,9 +40,10 @@ if ((exit_code != 0)); then
 fi
 
 echo "[backend] Starting backend server..."
+export AUTO_START_RUNTIME=0
 export SERVER_LOG_STDOUT=1
 export SERVER_LOG_STDOUT_FORCE=1
-echo "[backend] SERVER_LOG_STDOUT=1 SERVER_LOG_STDOUT_FORCE=1"
+echo "[backend] AUTO_START_RUNTIME=0 SERVER_LOG_STDOUT=1 SERVER_LOG_STDOUT_FORCE=1"
 node dist/index.js &
 child_pid=$!
 printf '%s\n' "$child_pid" >"$BACKEND_PIDFILE"

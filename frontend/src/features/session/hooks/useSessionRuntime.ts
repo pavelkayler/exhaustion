@@ -118,5 +118,5 @@ export function useSessionRuntime(options?: UseSessionRuntimeOptions) {
   const canPause = status.sessionState === "RUNNING" && busy === "none";
   const canResume = status.sessionState === "PAUSED" && busy === "none";
 
-  return { status, busy, error, start, stop, pause, resume, canStart, canStop, canPause, canResume };
+  return { status, busy, error, start, stop, pause, resume, refresh, canStart, canStop, canPause, canResume };
 }

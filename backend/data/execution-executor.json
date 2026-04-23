@@ -7,17 +7,17 @@
     "slPct": 33.3333,
     "firstOrderOffsetPct": 0,
     "gridOrdersCount": 3,
-    "gridStepPct": 10,
+    "gridStepPct": 15,
     "orderAliveMin": 0,
     "cooldownMin": 5,
     "trackCandidateSignalsForResearch": false,
-    "takeCandidateSignalsInLiveExecution": true,
+    "takeCandidateSignalsInLiveExecution": false,
     "takeFinalSignals": true,
     "cancelActivePositionOrders": false,
     "exit": "full"
   },
   "running": true,
   "error": null,
-  "updatedAt": 1776507870967,
+  "updatedAt": 1776725253838,
   "positionStates": {}
 }

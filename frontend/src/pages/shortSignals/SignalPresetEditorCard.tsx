@@ -15,9 +15,16 @@ type Props = {
   selectedPresetId: string | null;
   presetName: string;
   thresholds: SignalThresholds | null;
+  activePresetId: string | null;
+  activePresetName: string | null;
+  isDraftApplied: boolean;
   loading: boolean;
   busyAction: "none" | "save" | "delete" | "apply";
+  controlsDisabled?: boolean;
   error: string | null;
+  hotRegimeMode: boolean;
+  hotRegimeBusy: boolean;
+  hotRegimeError?: string | null;
   onPresetSelect: (presetId: string) => void;
   onPresetNameChange: (value: string) => void;
   onThresholdChange: (
@@ -28,6 +35,7 @@ type Props = {
   onSave: () => void;
   onDelete: () => void;
   onApply: () => void;
+  onHotRegimeToggle: (checked: boolean) => void;
 };
 
 const CANDIDATE_FIELDS: NumericFieldDescriptor[] = [
@@ -121,15 +129,23 @@ export function SignalPresetEditorCard(props: Props) {
     selectedPresetId,
     presetName,
     thresholds,
+    activePresetId,
+    activePresetName,
+    isDraftApplied,
     loading,
     busyAction,
+    controlsDisabled = false,
     error,
+    hotRegimeMode,
+    hotRegimeBusy,
+    hotRegimeError = null,
     onPresetSelect,
     onPresetNameChange,
     onThresholdChange,
     onSave,
     onDelete,
     onApply,
+    onHotRegimeToggle,
   } = props;
 
   const selectedPreset = presets.find((preset) => preset.id === selectedPresetId) ?? null;
@@ -145,51 +161,93 @@ export function SignalPresetEditorCard(props: Props) {
           </Alert>
         ) : null}
 
-        <Row className="g-3 align-items-end mb-3">
-          <Col lg={4}>
+        <Row className="g-3 align-items-stretch mb-3">
+          <Col lg={6} xl={5}>
             <Form.Group>
               <Form.Label>Preset</Form.Label>
               <Form.Select
                 value={selectedPresetId ?? ""}
-                disabled={loading || busyAction !== "none"}
+                disabled={loading || controlsDisabled || busyAction !== "none"}
                 onChange={(event) => onPresetSelect(event.currentTarget.value)}
               >
                 {presets.map((preset) => (
                   <option key={preset.id} value={preset.id}>
-                    {preset.name}
+                    {preset.name}{preset.id === activePresetId ? " • active" : ""}
                   </option>
                 ))}
               </Form.Select>
+              <div className={`small mt-1 ${isDraftApplied ? "text-success" : "text-warning"}`}>
+                {isDraftApplied
+                  ? `Active on server${activePresetName ? `: ${activePresetName}` : ""}`
+                  : `Draft differs from server${activePresetName ? ` • active: ${activePresetName}` : ""}`}
+              </div>
             </Form.Group>
           </Col>
 
-          <Col lg={4}>
+          <Col lg={6} xl={4}>
             <Form.Group>
               <Form.Label>Preset Name</Form.Label>
               <Form.Control
                 value={presetName}
-                disabled={loading || busyAction !== "none"}
+                disabled={loading || controlsDisabled || busyAction !== "none"}
                 onChange={(event) => onPresetNameChange(event.currentTarget.value)}
               />
             </Form.Group>
           </Col>
 
-          <Col lg={4} className="d-flex gap-2 justify-content-lg-end">
-            <Button variant="outline-light" disabled={loading || busyAction !== "none"} onClick={onSave}>
-              {busyAction === "save" ? "Saving..." : "Save"}
-            </Button>
-            <Button variant="outline-danger" disabled={!canDelete} onClick={onDelete}>
-              {busyAction === "delete" ? "Deleting..." : "Delete"}
-            </Button>
-            <Button variant="success" disabled={loading || busyAction !== "none" || thresholds == null} onClick={onApply}>
-              {busyAction === "apply" ? "Applying..." : "Apply"}
-            </Button>
+          <Col xl={3}>
+            <div className="d-flex h-100 flex-column gap-3">
+              <div className="rounded border px-3 py-3">
+                <Form.Check
+                  type="switch"
+                  id="short-signals-hot-regime-mode"
+                  label="Hot regime mode"
+                  checked={hotRegimeMode}
+                  disabled={loading || controlsDisabled || hotRegimeBusy}
+                  onChange={(event) => {
+                    const checked = event.currentTarget.checked;
+                    onHotRegimeToggle(checked);
+                  }}
+                  className="mb-1 user-select-none"
+                />
+                <div className="small text-secondary">
+                  OFF = legacy tracking, ON = hot-regime top200 tracking
+                </div>
+                {hotRegimeError ? (
+                  <div className="small text-danger mt-2">{hotRegimeError}</div>
+                ) : null}
+              </div>
+
+              <div className="d-flex flex-wrap gap-2 justify-content-xl-end mt-auto">
+                <Button
+                  variant="outline-light"
+                  disabled={loading || controlsDisabled || busyAction !== "none"}
+                  onClick={onSave}
+                >
+                  {busyAction === "save" ? "Saving..." : "Save"}
+                </Button>
+                <Button
+                  variant="outline-danger"
+                  disabled={!canDelete || controlsDisabled}
+                  onClick={onDelete}
+                >
+                  {busyAction === "delete" ? "Deleting..." : "Delete"}
+                </Button>
+                <Button
+                  variant="success"
+                  disabled={loading || controlsDisabled || busyAction !== "none" || thresholds == null}
+                  onClick={onApply}
+                >
+                  {busyAction === "apply" ? "Applying..." : "Apply"}
+                </Button>
+              </div>
+            </div>
           </Col>
         </Row>
 
         <div className="text-secondary small mb-3">
           Built-ins `Pump Fade Balanced`, `Pump Fade Strict`, `Pump Fade Aggressive`, and `Pump Fade High Frequency` are Candidate-oriented presets for pump-fade entries, from stricter to more aggressive.
-          Apply stores thresholds on the backend and, if the session is running, stops it first. Start remains manual from the header.
+          Apply stores thresholds on the backend and, if the session or executor is running, stops them first. Start remains manual from the header and from the executor card.
         </div>
 
         {thresholds == null ? (
@@ -216,7 +274,10 @@ export function SignalPresetEditorCard(props: Props) {
                   id="signal-presets-use-long-short-ratio"
                   label="Use Long/Short Ratio"
                   checked={thresholds.derivatives.useLongShortRatio}
-                  onChange={(event) => onThresholdChange("derivatives", "useLongShortRatio", event.currentTarget.checked)}
+                  onChange={(event) => {
+                    const checked = event.currentTarget.checked;
+                    onThresholdChange("derivatives", "useLongShortRatio", checked);
+                  }}
                 />
               </Accordion.Body>
             </Accordion.Item>

@@ -1,4 +1,5 @@
 import type { PaperBrokerTickConfigOverride, PaperSide } from "../paper/PaperBroker.js";
+import type { DemoCloseType } from "./demoCloseUtils.js";
 
 export type DemoStats = {
   mode: "demo";
@@ -70,6 +71,9 @@ export type SymbolState = {
   slPrice: number | null;
   pendingEntries: PendingEntry[];
   cooldownUntil: number;
+  missingPositionSinceMs: number | null;
+  lastCloseType: DemoCloseType | null;
+  lastClosedAtMs: number | null;
   lastServerUnrealizedPnl: number | null;
   realizedPnl: number;
   feesPaid: number;

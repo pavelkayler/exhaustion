@@ -76,7 +76,13 @@ export type RuntimeConfig = {
   selectedBotId?: string;
   selectedBotPresetId?: string;
   selectedExecutionProfileId?: string;
-  botConfig?: Record<string, unknown>;
+  botConfig?: {
+    observe?: {
+      useHotRegimeTracking?: boolean;
+      [key: string]: unknown;
+    };
+    [key: string]: unknown;
+  };
   universe: {
     selectedId: string;
     symbols: string[];
@@ -238,6 +244,13 @@ export type ShortOiSpikeWatchlistRecord = {
   shortSummaryReason: string | null;
   signalOrdinal: number;
   coinglassUrl: string;
+};
+
+export type ShortSignalRowsFilter = {
+  showRejected: boolean;
+  showCandidate: boolean;
+  showWatchlist: boolean;
+  showFinal: boolean;
 };
 
 export type WsRpcAction =

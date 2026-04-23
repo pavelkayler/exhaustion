@@ -5,6 +5,7 @@ import { WebSocketServer, WebSocket, type RawData } from "ws";
 import { BybitDemoRestClient } from "../bybit/BybitDemoRestClient.js";
 import { BybitRealRestClient } from "../bybit/BybitRealRestClient.js";
 import { runtime } from "../runtime/runtime.js";
+import { isHardExcludedShortSymbol } from "../runtime/shortSymbolExclusions.js";
 import {
   executorStore,
   type ExecutionMode,
@@ -102,7 +103,7 @@ type ExecutionRestClient = {
   setTradingStopLinear(params: Record<string, unknown>): Promise<unknown>;
 };
 
-type StoredPositionRow = ExecutionPositionRow & {
+export type StoredPositionRow = ExecutionPositionRow & {
   leverage: number | null;
   optimisticProtectionOnly: boolean;
   updatedAt: number;
@@ -119,6 +120,7 @@ type StoredOrderRow = ExecutionOrderRow & {
 type InstrumentSpec = {
   tickSize: number;
   qtyStep: number;
+  maxLeverage: number | null;
 };
 
 type TrailingReconcileSummary = {
@@ -178,6 +180,61 @@ function inferReason(row: Record<string, unknown>): ExecutionReason {
   if (orderLinkId.includes("candidate")) return "candidate";
   if (orderLinkId.includes("final")) return "final";
   return "manual";
+}
+
+function preferExecutionReason(
+  current: ExecutionReason,
+  fallback: ExecutionReason | null | undefined,
+): ExecutionReason {
+  if (current !== "manual") return current;
+  if (fallback === "candidate" || fallback === "final") return fallback;
+  return current;
+}
+
+export function hasOpenExecutionPositionForSymbol(
+  rows: Array<Pick<StoredPositionRow, "symbol" | "size">>,
+  symbol: string,
+): boolean {
+  const normalizedSymbol = String(symbol ?? "").trim().toUpperCase();
+  if (!normalizedSymbol) return false;
+  return rows.some((row) => row.symbol === normalizedSymbol && Number(row.size ?? 0) > 0);
+}
+
+export function resolveTradeableSignalSkipReason(args: {
+  symbol: string;
+  positions: Array<Pick<StoredPositionRow, "symbol" | "size">>;
+  cooldownActive: boolean;
+  excluded: boolean;
+  afterRefresh?: boolean;
+}): string | null {
+  if (args.excluded) return "symbol_hard_excluded";
+  if (hasOpenExecutionPositionForSymbol(args.positions, args.symbol)) {
+    return args.afterRefresh ? "position_already_open_after_refresh" : "position_already_open";
+  }
+  if (args.cooldownActive) {
+    return args.afterRefresh ? "cooldown_active_after_refresh" : "cooldown_active";
+  }
+  return null;
+}
+
+export function resolveExecutionSignalEligibilitySkipReason(args: {
+  reason: ExecutionReason | null;
+  advisoryVerdict: string | null;
+  state?: string | null;
+}): string | null {
+  const state = normalizeSignalState(args.state);
+  if (args.reason === "candidate") {
+    if (state === "CANDIDATE" || state === "CONFIRMED") {
+      return null;
+    }
+    if (args.advisoryVerdict !== "TRADEABLE") {
+      return "candidate_not_tradeable";
+    }
+  }
+  if (args.reason === "final" && args.advisoryVerdict !== "TRADEABLE") {
+    return "final_not_tradeable";
+  }
+  return null;
 }
 
 function safeSend(ws: WebSocket, body: ServerMessage): void {
@@ -266,7 +323,7 @@ function mergeNullableString(
   return text ? text.toUpperCase() : null;
 }
 
-function normalizePositionRow(
+export function normalizePositionRow(
   row: Record<string, unknown>,
   previous: StoredPositionRow | null,
   receivedAt: number,
@@ -280,11 +337,12 @@ function normalizePositionRow(
   }
 
   const updatedAt = readRowUpdatedAt(row, receivedAt);
+  const inferredReason = inferReason(row);
 
   return {
     key,
     symbol,
-    reason: inferReason(row),
+    reason: preferExecutionReason(inferredReason, previous?.reason),
     value: mergeNullableNumber(previous?.value ?? null, row, ["positionValue", "positionBalance", "positionIM"]),
     pnl: mergeNullableNumber(previous?.pnl ?? null, row, ["unrealisedPnl"]),
     tp: mergeNullableNumber(previous?.tp ?? null, row, ["takeProfit"], { positiveOnly: true }),
@@ -292,7 +350,7 @@ function normalizePositionRow(
     trailingStop: mergeNullableNumber(previous?.trailingStop ?? null, row, ["trailingStop"], { positiveOnly: true }),
     side,
     size,
-    entryPrice: mergeNullableNumber(previous?.entryPrice ?? null, row, ["avgPrice"], { positiveOnly: true }),
+    entryPrice: mergeNullableNumber(previous?.entryPrice ?? null, row, ["entryPrice", "avgPrice", "sessionAvgPrice"], { positiveOnly: true }),
     markPrice: mergeNullableNumber(previous?.markPrice ?? null, row, ["markPrice"], { positiveOnly: true }),
     positionIdx: mergeNullableNumber(previous?.positionIdx ?? null, row, ["positionIdx"]),
     updatedAt,
@@ -394,9 +452,13 @@ function parseInstrumentSpec(raw: Record<string, unknown>): InstrumentSpec {
   const lotSizeFilter = (
     raw.lotSizeFilter && typeof raw.lotSizeFilter === "object" ? raw.lotSizeFilter : {}
   ) as Record<string, unknown>;
+  const leverageFilter = (
+    raw.leverageFilter && typeof raw.leverageFilter === "object" ? raw.leverageFilter : {}
+  ) as Record<string, unknown>;
   return {
     tickSize: readPositiveNumber(priceFilter.tickSize ?? raw.tickSize) ?? 0.01,
     qtyStep: readPositiveNumber(lotSizeFilter.qtyStep ?? raw.qtyStep) ?? 0.001,
+    maxLeverage: readPositiveNumber(leverageFilter.maxLeverage ?? raw.maxLeverage),
   };
 }
 
@@ -459,11 +521,12 @@ function computeLossBoundStopPrice(args: {
     : entryPrice - ratio;
 }
 
-function estimateFilledGridOrders(args: {
+export function estimateFilledGridOrders(args: {
   entryPrice: number;
   positionSize: number;
   marginPerOrder: number;
   leverage: number;
+  maxGridOrders?: number;
 }): number {
   const { entryPrice, positionSize, marginPerOrder, leverage } = args;
   const absoluteSize = Math.abs(Number(positionSize));
@@ -475,7 +538,12 @@ function estimateFilledGridOrders(args: {
   // Qty is rounded down to exchange step, so allow a small tolerance before
   // deciding that the next grid tier is fully filled.
   const effectiveOrders = (entryPrice * absoluteSize) / orderNotional;
-  return Math.max(0, Math.floor(effectiveOrders + 0.05));
+  const estimated = Math.max(0, Math.floor(effectiveOrders + 0.05));
+  const maxGridOrders = Math.max(0, Math.floor(Number(args.maxGridOrders) || 0));
+  if (maxGridOrders > 0) {
+    return Math.min(estimated, maxGridOrders);
+  }
+  return estimated;
 }
 
 function computeTrailingDistance(entryPrice: number, slPct: number): number {
@@ -527,6 +595,79 @@ export function selectEntryQtyWithinTolerance(args: {
   }
 
   return roundedDownQty;
+}
+
+export function computeSignalEntryBudget(args: {
+  marginPerOrder: number;
+  strategyLeverage: number;
+  symbolMaxLeverage: number | null;
+}): {
+  targetNotionalPerOrder: number;
+  effectiveLeverage: number;
+  effectiveMarginPerOrder: number;
+} {
+  const marginPerOrder = Math.max(0, Number(args.marginPerOrder) || 0);
+  const strategyLeverage = Math.max(0, Number(args.strategyLeverage) || 0);
+  const targetNotionalPerOrder = marginPerOrder * strategyLeverage;
+  const symbolMaxLeverage = Math.max(0, Number(args.symbolMaxLeverage) || 0);
+  const effectiveLeverage = symbolMaxLeverage > 0
+    ? Math.min(strategyLeverage, symbolMaxLeverage)
+    : strategyLeverage;
+  const effectiveMarginPerOrder = effectiveLeverage > 0
+    ? targetNotionalPerOrder / effectiveLeverage
+    : 0;
+
+  return {
+    targetNotionalPerOrder,
+    effectiveLeverage,
+    effectiveMarginPerOrder,
+  };
+}
+
+type ProtectionType = "tp" | "sl";
+
+export function shouldFallbackToMarketCloseForProtection(args: {
+  side: string | null;
+  currentPrice: number | null;
+  targetPrice: number | null;
+  protectionType: ProtectionType;
+}): boolean {
+  const side = String(args.side ?? "").trim().toUpperCase();
+  const currentPrice = Number(args.currentPrice);
+  const targetPrice = Number(args.targetPrice);
+  if (!(currentPrice > 0) || !(targetPrice > 0)) return false;
+
+  if (side === "SELL") {
+    return args.protectionType === "tp"
+      ? currentPrice <= targetPrice
+      : currentPrice >= targetPrice;
+  }
+
+  if (side === "BUY") {
+    return args.protectionType === "tp"
+      ? currentPrice >= targetPrice
+      : currentPrice <= targetPrice;
+  }
+
+  return false;
+}
+
+function extractRestErrorDetails(error: unknown): {
+  message: string;
+  status: number | null;
+  retCode: number | null;
+  retMsg: string | null;
+} {
+  const source = (error && typeof error === "object") ? (error as Record<string, unknown>) : {};
+  const status = readNumber(source.status);
+  const retCode = readNumber(source.retCode);
+  const retMsgRaw = source.retMsg;
+  return {
+    message: String((error as Error)?.message ?? error),
+    status: Number.isFinite(status as number) ? Number(status) : null,
+    retCode: Number.isFinite(retCode as number) ? Number(retCode) : null,
+    retMsg: retMsgRaw == null ? null : String(retMsgRaw),
+  };
 }
 
 function normalizeSignalState(value: unknown): string {
@@ -611,6 +752,18 @@ export function shouldPlaceFirstShortEntryAsMarket(orderIndex: number, offsetPct
   return orderIndex === 0 && !(offsetPct > 0);
 }
 
+export function computeImmediateShortEntryTakeProfit(args: {
+  entryPrice: number;
+  tickSize: number;
+  tpPct: number;
+}): string | null {
+  const targetTp = roundNearestToStep(
+    computeTpPrice(args.entryPrice, "SELL", args.tpPct),
+    args.tickSize,
+  );
+  return targetTp > 0 ? formatForApi(targetTp) : null;
+}
+
 function computeShortGridEntryPrice(
   firstEntryPrice: number,
   averageEntryPrice: number,
@@ -663,7 +816,10 @@ function mergeStoredPositionRows(
 
   return {
     ...exchange,
-    reason: exchange.reason ?? other.reason,
+    reason: preferExecutionReason(
+      exchange.reason ?? other.reason ?? "manual",
+      other.reason ?? exchange.reason,
+    ),
     value: exchange.value ?? other.value,
     pnl: exchange.pnl ?? other.pnl,
     tp: protection.tp ?? exchange.tp ?? other.tp,
@@ -1416,8 +1572,23 @@ class PrivateExecutionExecutorManager {
 
   private readonly handleRuntimeEvent = (event: unknown) => {
     void this.processSignalTransitionEvent(event).catch((error) => {
+      const source = (event && typeof event === "object" ? event : {}) as Record<string, unknown>;
+      const payload = (
+        source.payload && typeof source.payload === "object" ? source.payload : {}
+      ) as Record<string, unknown>;
+      const snapshot = (
+        payload.snapshot && typeof payload.snapshot === "object" ? payload.snapshot : {}
+      ) as Record<string, unknown>;
+      const details = extractRestErrorDetails(error);
       this.logger.error(
-        { mode: this.activeSettings?.mode ?? "demo", error: String((error as Error)?.message ?? error) },
+        {
+          mode: this.activeSettings?.mode ?? "demo",
+          symbol: String(source.symbol ?? snapshot.symbol ?? "").trim().toUpperCase() || null,
+          error: details.message,
+          status: details.status,
+          retCode: details.retCode,
+          retMsg: details.retMsg,
+        },
         "private execution executor signal processing failed",
       );
     });
@@ -1771,7 +1942,12 @@ class PrivateExecutionExecutorManager {
       });
       return;
     }
-    if (reason === "final" && advisoryVerdict !== "TRADEABLE") {
+    const eligibilitySkipReason = resolveExecutionSignalEligibilitySkipReason({
+      reason,
+      advisoryVerdict: advisoryVerdict || null,
+      state: nextState || null,
+    });
+    if (eligibilitySkipReason) {
       this.logSignalStep("signal_skipped_reason", {
         mode: settings.mode,
         symbol,
@@ -1779,7 +1955,7 @@ class PrivateExecutionExecutorManager {
         reason,
         advisoryVerdict: advisoryVerdict || null,
         transitionReason,
-        skipReason: "final_not_tradeable",
+        skipReason: eligibilitySkipReason,
       });
       return;
     }
@@ -1843,8 +2019,13 @@ class PrivateExecutionExecutorManager {
       throw new Error("missing_credentials");
     }
 
-    const hasOpenPosition = stream.getPositionsDetailed().some((row) => row.symbol === args.symbol && Number(row.size ?? 0) > 0);
-    if (hasOpenPosition) {
+    const initialSkipReason = resolveTradeableSignalSkipReason({
+      symbol: args.symbol,
+      positions: stream.getPositionsDetailed(),
+      cooldownActive: this.isCooldownActive(args.settings.mode, args.symbol, args.settings),
+      excluded: isHardExcludedShortSymbol(args.symbol),
+    });
+    if (initialSkipReason != null) {
       this.logSignalStep("signal_skipped_reason", {
         mode: args.settings.mode,
         symbol: args.symbol,
@@ -1852,21 +2033,8 @@ class PrivateExecutionExecutorManager {
         reason: args.reason,
         advisoryVerdict: args.advisoryVerdict,
         transitionReason: args.transitionReason,
-        skipReason: "position_already_open",
-      });
-      return;
-    }
-
-    if (this.isCooldownActive(args.settings.mode, args.symbol, args.settings)) {
-      this.logSignalStep("signal_skipped_reason", {
-        mode: args.settings.mode,
-        symbol: args.symbol,
-        state: args.state,
-        reason: args.reason,
-        advisoryVerdict: args.advisoryVerdict,
-        transitionReason: args.transitionReason,
-        cooldownMin: args.settings.cooldownMin,
-        skipReason: "cooldown_active",
+        ...(initialSkipReason.includes("cooldown") ? { cooldownMin: args.settings.cooldownMin } : {}),
+        skipReason: initialSkipReason,
       });
       return;
     }
@@ -1882,6 +2050,26 @@ class PrivateExecutionExecutorManager {
       canceledOrders: canceled,
     });
     await stream.forceRefresh(`signal_${args.symbol}_pre_place_refresh`, { includeOrders: true });
+    const postRefreshSkipReason = resolveTradeableSignalSkipReason({
+      symbol: args.symbol,
+      positions: stream.getPositionsDetailed(),
+      cooldownActive: this.isCooldownActive(args.settings.mode, args.symbol, args.settings),
+      excluded: isHardExcludedShortSymbol(args.symbol),
+      afterRefresh: true,
+    });
+    if (postRefreshSkipReason != null) {
+      this.logSignalStep("signal_skipped_reason", {
+        mode: args.settings.mode,
+        symbol: args.symbol,
+        state: args.state,
+        reason: args.reason,
+        advisoryVerdict: args.advisoryVerdict,
+        transitionReason: args.transitionReason,
+        ...(postRefreshSkipReason.includes("cooldown") ? { cooldownMin: args.settings.cooldownMin } : {}),
+        skipReason: postRefreshSkipReason,
+      });
+      return;
+    }
     const grid = await this.placeSignalEntryGrid(stream, restClient, args);
     await stream.forceRefresh(`signal_${args.symbol}_post_place_refresh`, { includeOrders: true });
     this.logSignalStep("grid_submitted", {
@@ -2018,16 +2206,45 @@ class PrivateExecutionExecutorManager {
   ): Promise<{ ordersCount: number; marginPerOrder: number; orderLinkIds: string[] }> {
     const instrument = await this.getInstrumentSpec(args.settings.mode, restClient, args.symbol);
     const ordersCount = Math.max(1, Math.floor(Number(args.settings.gridOrdersCount) || 0));
-    const marginPerOrder = args.settings.maxUsdt;
-    if (!(marginPerOrder > 0) || !(args.settings.leverage > 0)) {
+    const strategyMarginPerOrder = args.settings.maxUsdt;
+    if (!(strategyMarginPerOrder > 0) || !(args.settings.leverage > 0)) {
+      throw new Error("invalid_executor_order_budget");
+    }
+    const budget = computeSignalEntryBudget({
+      marginPerOrder: strategyMarginPerOrder,
+      strategyLeverage: args.settings.leverage,
+      symbolMaxLeverage: instrument.maxLeverage,
+    });
+    if (!(budget.targetNotionalPerOrder > 0) || !(budget.effectiveLeverage > 0)) {
       throw new Error("invalid_executor_order_budget");
     }
 
-    await restClient.setLeverageLinear({
-      symbol: args.symbol,
-      buyLeverage: formatForApi(args.settings.leverage),
-      sellLeverage: formatForApi(args.settings.leverage),
-    });
+    try {
+      await restClient.setLeverageLinear({
+        symbol: args.symbol,
+        buyLeverage: formatForApi(budget.effectiveLeverage),
+        sellLeverage: formatForApi(budget.effectiveLeverage),
+      });
+    } catch (error) {
+      const details = extractRestErrorDetails(error);
+      this.logger.error(
+        {
+          mode: args.settings.mode,
+          symbol: args.symbol,
+          requestedLeverage: args.settings.leverage,
+          effectiveLeverage: budget.effectiveLeverage,
+          symbolMaxLeverage: instrument.maxLeverage,
+          targetNotionalPerOrder: budget.targetNotionalPerOrder,
+          effectiveMarginPerOrder: budget.effectiveMarginPerOrder,
+          error: details.message,
+          status: details.status,
+          retCode: details.retCode,
+          retMsg: details.retMsg,
+        },
+        "private execution executor set leverage failed",
+      );
+      throw error;
+    }
 
     const createdOrderLinkIds: string[] = [];
     const batchTs = Date.now();
@@ -2053,7 +2270,7 @@ class PrivateExecutionExecutorManager {
         }
 
         const qty = selectEntryQtyWithinTolerance({
-          targetNotional: marginPerOrder * Number(args.settings.leverage),
+          targetNotional: budget.targetNotionalPerOrder,
           price,
           qtyStep: instrument.qtyStep,
         });
@@ -2068,12 +2285,20 @@ class PrivateExecutionExecutorManager {
           index,
           args.settings.firstOrderOffsetPct,
         );
+        const immediateTakeProfit = useMarketOrder
+          ? computeImmediateShortEntryTakeProfit({
+              entryPrice: price,
+              tickSize: instrument.tickSize,
+              tpPct: args.settings.tpPct,
+            })
+          : null;
 
         const request = {
           symbol: args.symbol,
           side: "Sell",
           orderType: useMarketOrder ? "Market" : "Limit",
           ...(useMarketOrder ? {} : { price: formatForApi(price) }),
+          ...(immediateTakeProfit ? { takeProfit: immediateTakeProfit } : {}),
           qty: formatForApi(qty),
           timeInForce: useMarketOrder ? "IOC" : "GTC",
           positionIdx: 2,
@@ -2086,14 +2311,41 @@ class PrivateExecutionExecutorManager {
             symbol: args.symbol,
             state: args.state,
             reason: args.reason,
+            requestedLeverage: args.settings.leverage,
+            effectiveLeverage: budget.effectiveLeverage,
+            symbolMaxLeverage: instrument.maxLeverage,
+            targetNotionalPerOrder: budget.targetNotionalPerOrder,
             request,
           },
           "private execution executor place signal entry order",
         );
-        await restClient.placeOrderLinear(request);
+        try {
+          await restClient.placeOrderLinear(request);
+        } catch (error) {
+          const details = extractRestErrorDetails(error);
+          this.logger.error(
+            {
+              mode: args.settings.mode,
+              symbol: args.symbol,
+              state: args.state,
+              reason: args.reason,
+              requestedLeverage: args.settings.leverage,
+              effectiveLeverage: budget.effectiveLeverage,
+              symbolMaxLeverage: instrument.maxLeverage,
+              targetNotionalPerOrder: budget.targetNotionalPerOrder,
+              request,
+              error: details.message,
+              status: details.status,
+              retCode: details.retCode,
+              retMsg: details.retMsg,
+            },
+            "private execution executor place signal entry order failed",
+          );
+          throw error;
+        }
       }
     } catch (error) {
-      const message = String((error as Error)?.message ?? error);
+      const details = extractRestErrorDetails(error);
       for (const orderLinkId of createdOrderLinkIds) {
         try {
           await restClient.cancelOrderLinear({ symbol: args.symbol, orderLinkId });
@@ -2101,14 +2353,80 @@ class PrivateExecutionExecutorManager {
           continue;
         }
       }
-      throw new Error(message);
+      const wrapped = new Error(details.message);
+      const wrappedMeta = wrapped as unknown as Record<string, unknown>;
+      wrappedMeta.status = details.status;
+      wrappedMeta.retCode = details.retCode;
+      wrappedMeta.retMsg = details.retMsg;
+      wrappedMeta.symbol = args.symbol;
+      throw wrapped;
     }
 
     return {
       ordersCount,
-      marginPerOrder,
+      marginPerOrder: budget.effectiveMarginPerOrder,
       orderLinkIds: [...createdOrderLinkIds],
     };
+  }
+
+  private async closePositionMarket(
+    restClient: ExecutionRestClient,
+    args: {
+      settings: ExecutorSettings;
+      position: StoredPositionRow;
+      reason: string;
+      fallbackReason: string;
+      triggerType: ProtectionType;
+      targetPrice: number;
+      currentPrice: number;
+    },
+  ): Promise<void> {
+    const size = Math.abs(Number(args.position.size ?? 0));
+    const side = String(args.position.side ?? "").trim().toUpperCase();
+    if (!(size > 0) || (side !== "BUY" && side !== "SELL")) {
+      throw new Error("position_not_closeable");
+    }
+
+    const closeSide = side === "BUY" ? "Sell" : "Buy";
+    const positionIdx = resolvePositionIdx(args.position);
+    this.logger.warn(
+      {
+        mode: args.settings.mode,
+        reason: args.reason,
+        symbol: args.position.symbol,
+        side,
+        size,
+        positionIdx,
+        triggerType: args.triggerType,
+        targetPrice: args.targetPrice,
+        currentPrice: args.currentPrice,
+        fallbackReason: args.fallbackReason,
+      },
+      "private execution executor fallback to market close",
+    );
+    await restClient.placeOrderLinear({
+      symbol: args.position.symbol,
+      side: closeSide,
+      orderType: "Market",
+      qty: formatForApi(size),
+      reduceOnly: true,
+      positionIdx,
+    });
+    this.logger.info(
+      {
+        mode: args.settings.mode,
+        reason: args.reason,
+        symbol: args.position.symbol,
+        side,
+        size,
+        positionIdx,
+        triggerType: args.triggerType,
+        targetPrice: args.targetPrice,
+        currentPrice: args.currentPrice,
+        fallbackReason: args.fallbackReason,
+      },
+      "private execution executor fallback market close accepted",
+    );
   }
 
   private async reconcileFullPositions(
@@ -2147,6 +2465,7 @@ class PrivateExecutionExecutorManager {
           positionSize: Number(position.size ?? 0),
           marginPerOrder: settings.maxUsdt,
           leverage: settings.leverage,
+          maxGridOrders: settings.gridOrdersCount,
         });
         shouldSetStop = filledGridOrders >= Math.max(1, settings.gridOrdersCount);
         const targetTp = roundNearestToStep(
@@ -2180,6 +2499,7 @@ class PrivateExecutionExecutorManager {
 
         attempted += 1;
         const patchErrors: string[] = [];
+        let closedByFallback = false;
         const applyPatch = async (
           patch: Record<string, unknown>,
           errorLabel: string,
@@ -2192,8 +2512,8 @@ class PrivateExecutionExecutorManager {
             });
             return true;
           } catch (error) {
-            const message = String((error as Error)?.message ?? error);
-            patchErrors.push(`${errorLabel}: ${message}`);
+            const details = extractRestErrorDetails(error);
+            patchErrors.push(`${errorLabel}: ${details.message}`);
             this.logger.error(
               {
                 mode: settings.mode,
@@ -2205,10 +2525,70 @@ class PrivateExecutionExecutorManager {
                 filledGridOrders,
                 shouldSetStop,
                 patch,
-                error: message,
+                error: details.message,
+                status: details.status,
+                retCode: details.retCode,
+                retMsg: details.retMsg,
               },
               "private execution executor trading stop patch failed",
             );
+
+            const protectionType: ProtectionType | null = errorLabel === "tp_set"
+              ? "tp"
+              : (errorLabel === "sl_set" ? "sl" : null);
+            const targetPrice = protectionType === "tp"
+              ? readPositiveNumber(patch.takeProfit)
+              : (protectionType === "sl" ? readPositiveNumber(patch.stopLoss) : null);
+            const currentPrice = readPositiveNumber(position.markPrice);
+
+            if (
+              protectionType
+              && targetPrice != null
+              && currentPrice != null
+              && shouldFallbackToMarketCloseForProtection({
+                side: position.side,
+                currentPrice,
+                targetPrice,
+                protectionType,
+              })
+            ) {
+              try {
+                await this.closePositionMarket(restClient, {
+                  settings,
+                  position,
+                  reason,
+                  fallbackReason: `${errorLabel}_threshold_already_crossed`,
+                  triggerType: protectionType,
+                  targetPrice,
+                  currentPrice,
+                });
+                closedByFallback = true;
+                return true;
+              } catch (closeError) {
+                const closeDetails = extractRestErrorDetails(closeError);
+                patchErrors.push(`${errorLabel}_fallback_close: ${closeDetails.message}`);
+                this.logger.error(
+                  {
+                    mode: settings.mode,
+                    reason,
+                    symbol: position.symbol,
+                    side: position.side,
+                    positionIdx,
+                    entryPrice: position.entryPrice,
+                    filledGridOrders,
+                    shouldSetStop,
+                    triggerType: protectionType,
+                    targetPrice,
+                    currentPrice,
+                    error: closeDetails.message,
+                    status: closeDetails.status,
+                    retCode: closeDetails.retCode,
+                    retMsg: closeDetails.retMsg,
+                  },
+                  "private execution executor fallback market close failed",
+                );
+              }
+            }
             return false;
           }
         };
@@ -2246,6 +2626,10 @@ class PrivateExecutionExecutorManager {
             { tpslMode: "Full", takeProfit: formatForApi(targetTp), tpTriggerBy: "LastPrice" },
             "tp_set",
           );
+          if (closedByFallback) {
+            await stream.forceRefresh(`fallback_close_${position.symbol}`, { includeOrders: true });
+            continue;
+          }
         }
 
         if (needsSlSet) {
@@ -2257,6 +2641,10 @@ class PrivateExecutionExecutorManager {
             { tpslMode: "Full", stopLoss: formatForApi(targetSl), slTriggerBy: "LastPrice" },
             "sl_set",
           );
+          if (closedByFallback) {
+            await stream.forceRefresh(`fallback_close_${position.symbol}`, { includeOrders: true });
+            continue;
+          }
         }
 
         if (patchErrors.length === 0) {
@@ -2288,7 +2676,7 @@ class PrivateExecutionExecutorManager {
         );
       } catch (error) {
         failed += 1;
-        const message = String((error as Error)?.message ?? error);
+        const details = extractRestErrorDetails(error);
         this.logger.error(
           {
             mode: settings.mode,
@@ -2302,7 +2690,10 @@ class PrivateExecutionExecutorManager {
             tp: position.tp,
             sl: position.sl,
             trailingStop: position.trailingStop,
-            error: message,
+            error: details.message,
+            status: details.status,
+            retCode: details.retCode,
+            retMsg: details.retMsg,
           },
           "private execution executor full reconcile failed",
         );
@@ -2510,7 +2901,9 @@ class PrivateExecutionExecutorManager {
 
     const rows = await restClient.getInstrumentsInfoLinear({ symbol });
     const row = Array.isArray(rows) ? rows[0] : null;
-    const spec = row && typeof row === "object" ? parseInstrumentSpec(row) : { tickSize: 0.01, qtyStep: 0.001 };
+    const spec = row && typeof row === "object"
+      ? parseInstrumentSpec(row)
+      : { tickSize: 0.01, qtyStep: 0.001, maxLeverage: null };
     this.instrumentCache.set(key, spec);
     return spec;
   }

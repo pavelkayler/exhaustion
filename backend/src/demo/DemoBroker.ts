@@ -3,6 +3,7 @@ import { pickLinearMeta, type LinearInstrumentMeta } from "../bybit/instrumentsM
 import type { EventLogger } from "../logging/EventLogger.js";
 import type { PaperBrokerConfig, PaperBrokerTickConfigOverride, PaperSide, PaperView } from "../paper/PaperBroker.js";
 import { applyGlobalRearmCooldown } from "../runtime/rearmPolicy.js";
+import { resolveDemoCloseType } from "./demoCloseUtils.js";
 import { pollDemoClosedPnl } from "./operations/closedPnlPolling.js";
 import { readDemoWalletUsdtBalance, startDemoBalancePolling, stopDemoBalancePolling } from "./operations/balance.js";
 import { pollDemoExecutions } from "./operations/executionPolling.js";
@@ -194,6 +195,9 @@ export class DemoBroker {
       slPrice: null,
       pendingEntries: [],
       cooldownUntil: 0,
+      missingPositionSinceMs: null,
+      lastCloseType: null,
+      lastClosedAtMs: null,
       lastServerUnrealizedPnl: null,
       realizedPnl: 0,
       feesPaid: 0,
@@ -548,6 +552,7 @@ export class DemoBroker {
       st.qty = null;
       st.tpPrice = null;
       st.slPrice = null;
+      st.missingPositionSinceMs = null;
       st.lastServerUnrealizedPnl = null;
       this.refreshExecutionState(st);
       return st;
@@ -604,6 +609,7 @@ export class DemoBroker {
     st.qty = totalQty > 0 ? totalQty : null;
     st.tpPrice = st.side != null && totalTpWeight > 0 ? weightedTp / totalTpWeight : null;
     st.slPrice = st.side != null && totalSlWeight > 0 ? weightedSl / totalSlWeight : null;
+    st.missingPositionSinceMs = null;
     st.lastServerUnrealizedPnl = hasUnrealized ? totalUnrealized : null;
     this.refreshExecutionState(st);
     return st;
@@ -625,9 +631,18 @@ export class DemoBroker {
     else this.demoLosses += 1;
     this.demoRealizedPnlUsdt += args.realizedPnl;
     const st = this.getState(args.symbol);
+    const payload = (args.payload ?? {}) as Record<string, unknown>;
+    const closeType = resolveDemoCloseType({
+      side: args.side,
+      exitPrice: Number(payload.avgExitPrice ?? payload.closePrice),
+      tpPrice: st.tpPrice,
+      slPrice: st.slPrice,
+    });
     st.realizedPnl += args.realizedPnl;
     st.feesPaid += args.feesPaid;
     st.fundingAccrued += fundingAccrued;
+    st.lastCloseType = closeType;
+    st.lastClosedAtMs = args.closedAtMs;
     this.logger.log({
       ts: args.closedAtMs,
       type: this.eventType("EXECUTION"),
@@ -639,9 +654,9 @@ export class DemoBroker {
         feesPaid: args.feesPaid,
         fundingAccrued,
         closedAt: args.closedAtMs,
-        closeType: "FORCE",
+        closeType,
         source: args.source,
-        ...(args.payload ?? {}),
+        ...payload,
       },
     });
   }

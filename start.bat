@@ -3,62 +3,50 @@ setlocal EnableExtensions
 
 set "ROOT=%~dp0"
 if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
-set "BACKEND_CMD_PIDFILE=%ROOT%\backend\.cmd.pid"
-set "FRONTEND_CMD_PIDFILE=%ROOT%\frontend\.cmd.pid"
 
-call :is_running "%BACKEND_CMD_PIDFILE%" 8080
-if errorlevel 1 (
-  echo Starting backend with live logs in its own console...
-  call :launch_terminal "exhaustion backend" "set SERVER_LOG_STDOUT=1 && set SERVER_LOG_STDOUT_FORCE=1 && npm install && npm run dev" "%BACKEND_CMD_PIDFILE%"
-) else (
-  echo Backend already running on port 8080.
-)
+set "BACKEND_PIDFILE=%ROOT%\backend\.cmd.pid"
+set "FRONTEND_PIDFILE=%ROOT%\frontend\.cmd.pid"
+set "BACKEND_RUNNER=%ROOT%\start_backend_window.bat"
+set "FRONTEND_RUNNER=%ROOT%\start_frontend_window.bat"
 
-call :is_running "%FRONTEND_CMD_PIDFILE%" 5173
-if errorlevel 1 (
-  echo Starting frontend with live logs in its own console...
-  call :launch_terminal "exhaustion frontend" "npm install && npm run dev" "%FRONTEND_CMD_PIDFILE%"
-) else (
-  echo Frontend already running on port 5173.
-)
+call powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "& {" ^
+  "  $root = '%ROOT%';" ^
+  "  $backendPidFile = Join-Path $root 'backend\.cmd.pid';" ^
+  "  $frontendPidFile = Join-Path $root 'frontend\.cmd.pid';" ^
+  "  $backendRunner = Join-Path $root 'start_backend_window.bat';" ^
+  "  $frontendRunner = Join-Path $root 'start_frontend_window.bat';" ^
+  "  function Test-PortListening([int]$port) {" ^
+  "    return [bool](Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue);" ^
+  "  }" ^
+  "  function Test-PidFile([string]$path) {" ^
+  "    if (-not (Test-Path $path)) { return $false }" ^
+  "    $procId = (Get-Content $path -ErrorAction SilentlyContinue | Select-Object -First 1).Trim();" ^
+  "    if (-not $procId) { Remove-Item $path -Force -ErrorAction SilentlyContinue; return $false }" ^
+  "    $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue;" ^
+  "    if ($null -eq $proc) { Remove-Item $path -Force -ErrorAction SilentlyContinue; return $false }" ^
+  "    return $true" ^
+  "  }" ^
+  "  function Start-Window([string]$runnerPath, [string]$pidFile, [string]$label) {" ^
+  "    Write-Host ('Starting ' + $label + ' with live logs in its own console...');" ^
+  "    Remove-Item $pidFile -Force -ErrorAction SilentlyContinue;" ^
+  "    $title = 'exhaustion ' + $label;" ^
+  "    $cmdLine = 'title ' + $title + ' && call \"' + $runnerPath + '\"';" ^
+  "    $proc = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/k', $cmdLine) -PassThru;" ^
+  "    Set-Content -Path $pidFile -Value $proc.Id;" ^
+  "    Write-Host ($label + ' console PID ' + $proc.Id + '.');" ^
+  "  }" ^
+  "  if ((Test-PidFile $backendPidFile) -or (Test-PortListening 8080)) {" ^
+  "    Write-Host 'Backend already running on port 8080.';" ^
+  "  } else {" ^
+  "    Start-Window $backendRunner $backendPidFile 'backend';" ^
+  "  }" ^
+  "  if ((Test-PidFile $frontendPidFile) -or (Test-PortListening 5173)) {" ^
+  "    Write-Host 'Frontend already running on port 5173.';" ^
+  "  } else {" ^
+  "    Start-Window $frontendRunner $frontendPidFile 'frontend';" ^
+  "  }" ^
+  "}"
 
 echo Start sequence launched.
-exit /b 0
-
-:is_running
-set "PIDFILE=%~1"
-set "PORT=%~2"
-set "PID="
-if exist "%PIDFILE%" (
-  set /p PID=<"%PIDFILE%"
-  set "PID=%PID: =%"
-)
-if not "%PID%"=="" (
-  tasklist /FI "PID eq %PID%" 2>nul | find "%PID%" >nul 2>&1
-  if not errorlevel 1 exit /b 0
-  del /q "%PIDFILE%" >nul 2>&1
-)
-call :port_listening %PORT%
-if not errorlevel 1 exit /b 0
-exit /b 1
-
-:port_listening
-set "PORT=%~1"
-netstat -ano | findstr /R /C:":%PORT% .*LISTENING" >nul 2>&1
-if errorlevel 1 exit /b 1
-exit /b 0
-
-:launch_terminal
-set "TITLE=%~1"
-set "COMMAND=%~2"
-set "PIDFILE=%~3"
-set "WORKDIR=%ROOT%"
-if /I "%TITLE%"=="exhaustion backend" set "WORKDIR=%ROOT%\backend"
-if /I "%TITLE%"=="exhaustion frontend" set "WORKDIR=%ROOT%\frontend"
-set "LAUNCH_PID="
-for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$proc = Start-Process -FilePath 'cmd.exe' -WorkingDirectory '%WORKDIR%' -ArgumentList '/k', ('title %TITLE% ^&^& %COMMAND%') -PassThru; $proc.Id"`) do set "LAUNCH_PID=%%P"
-if not "%LAUNCH_PID%"=="" (
-  >"%PIDFILE%" echo %LAUNCH_PID%
-  echo %TITLE% console PID %LAUNCH_PID%.
-)
 exit /b 0

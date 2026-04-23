@@ -2,12 +2,14 @@ import { useEffect, useMemo, useState } from "react";
 import { Card, Col, Container, Form, Row, Table } from "react-bootstrap";
 import { HeaderBar } from "../dashboard/components/HeaderBar";
 import { useSessionRuntime } from "../../features/session/hooks/useSessionRuntime";
-import { resetRuntimeArtifacts } from "../../features/session/api/sessionApi";
+import { fetchStatus, resetRuntimeArtifacts, stopSession } from "../../features/session/api/sessionApi";
 import { useWsFeed } from "../../features/ws/hooks/useWsFeed";
+import { fetchRuntimeConfig, updateRuntimeConfig } from "../../features/config/api/configApi";
 import type {
   LogEvent,
   SignalPreset,
   SignalThresholds,
+  ShortSignalRowsFilter,
   ShortOiSpikeWatchlistRecord,
   SymbolRow,
 } from "../../shared/types/domain";
@@ -27,6 +29,22 @@ const SHORT_SIGNAL_EVENT_TYPES = new Set([
 ]);
 
 const TABLE_FONT_SIZE = "0.875rem";
+const DEFAULT_SHORT_SIGNAL_FILTERS: ShortSignalRowsFilter = {
+  showRejected: true,
+  showCandidate: true,
+  showWatchlist: true,
+  showFinal: true,
+};
+const SIGNAL_STATE_FILTER_FIELDS: Array<{
+  key: keyof ShortSignalRowsFilter;
+  label: string;
+  id: string;
+}> = [
+  { key: "showCandidate", label: "candidate", id: "short-signals-filter-candidate" },
+  { key: "showWatchlist", label: "watchlist", id: "short-signals-filter-watchlist" },
+  { key: "showFinal", label: "final", id: "short-signals-filter-final" },
+  { key: "showRejected", label: "rejected", id: "short-signals-filter-rejected" },
+];
 
 function finite(value: unknown): number | null {
   const numeric = Number(value);
@@ -56,19 +74,36 @@ function isRejectedState(value: unknown): boolean {
   return normalizeState(value) === "REJECTED";
 }
 
+function isWatchlistState(value: unknown): boolean {
+  return normalizeState(value) === "WATCHLIST";
+}
+
+function isCandidateState(value: unknown): boolean {
+  return normalizeState(value) === "CANDIDATE";
+}
+
+function isFinalState(value: unknown): boolean {
+  const state = normalizeState(value);
+  return state === "FINAL" || state === "SOFT_FINAL";
+}
+
+function shouldShowState(value: unknown, filters: ShortSignalRowsFilter): boolean {
+  if (isRejectedState(value)) return filters.showRejected;
+  if (isCandidateState(value)) return filters.showCandidate;
+  if (isWatchlistState(value)) return filters.showWatchlist;
+  if (isFinalState(value)) return filters.showFinal;
+  return true;
+}
+
 function isActiveShortSignalRow(row: SymbolRow): boolean {
   const state = normalizeState(row.shortSignalState);
   return state !== "" && state !== "IDLE" && state !== "EXPIRED";
 }
 
-function isRejectedShortEvent(event: LogEvent): boolean {
+function resolveEventState(event: LogEvent): unknown {
   const payload = event.payload as Record<string, unknown> | null | undefined;
   const snapshot = payload?.snapshot as Record<string, unknown> | null | undefined;
-  return (
-    isRejectedState(payload?.nextState) ||
-    isRejectedState(payload?.state) ||
-    isRejectedState(snapshot?.state)
-  );
+  return payload?.nextState ?? payload?.state ?? snapshot?.state ?? null;
 }
 
 function eventSummary(event: LogEvent): string {
@@ -82,6 +117,34 @@ function buildCoinGlassUrl(symbol: string): string {
   return `https://www.coinglass.com/tv/Bybit_${encodeURIComponent(symbol)}`;
 }
 
+function resolvePresetDraftThresholds(args: {
+  presets: SignalPreset[];
+  selectedPresetId: string | null;
+  currentThresholds: SignalThresholds;
+}): SignalThresholds {
+  const selectedPreset = args.presets.find((preset) => preset.id === args.selectedPresetId) ?? null;
+  return structuredClone(selectedPreset?.thresholds ?? args.currentThresholds);
+}
+
+function serializeThresholds(thresholds: SignalThresholds | null | undefined): string | null {
+  return thresholds ? JSON.stringify(thresholds) : null;
+}
+
+function resolveAppliedPresetId(args: {
+  presets: SignalPreset[];
+  currentThresholds: SignalThresholds | null;
+}): string | null {
+  const currentKey = serializeThresholds(args.currentThresholds);
+  if (!currentKey) return null;
+  return args.presets.find((preset) => serializeThresholds(preset.thresholds) === currentKey)?.id ?? null;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
 export function ShortSignalsPage() {
   const {
     conn,
@@ -92,10 +155,16 @@ export function ShortSignalsPage() {
     events,
     eventStream,
     requestEventsTail,
-  } = useWsFeed();
-  const { status, busy, start, stop, pause, resume, canStart, canStop, canPause, canResume } =
+    requestRowsRefresh,
+  } = useWsFeed({
+    initialRowsRequest: {
+      detail: "signals",
+      shortSignalFilters: DEFAULT_SHORT_SIGNAL_FILTERS,
+    },
+  });
+  const { status, busy, start, stop, pause, resume, refresh, canStart, canStop, canPause, canResume } =
     useSessionRuntime();
-  const [hideRejected, setHideRejected] = useState(false);
+  const [rowFilters, setRowFilters] = useState<ShortSignalRowsFilter>(DEFAULT_SHORT_SIGNAL_FILTERS);
   const [presetLoading, setPresetLoading] = useState(true);
   const [presetError, setPresetError] = useState<string | null>(null);
   const [presetBusyAction, setPresetBusyAction] = useState<"none" | "save" | "delete" | "apply">("none");
@@ -104,22 +173,47 @@ export function ShortSignalsPage() {
   const [selectedPresetId, setSelectedPresetId] = useState<string | null>(null);
   const [presetName, setPresetName] = useState("");
   const [draftThresholds, setDraftThresholds] = useState<SignalThresholds | null>(null);
+  const [appliedThresholds, setAppliedThresholds] = useState<SignalThresholds | null>(null);
+  const [hotRegimeMode, setHotRegimeMode] = useState(false);
+  const [hotRegimeBusy, setHotRegimeBusy] = useState(false);
+  const [controlsError, setControlsError] = useState<string | null>(null);
+
+  const loadHotRegimeMode = async () => {
+    const runtimeConfig = await fetchRuntimeConfig();
+    const nextMode = Boolean(
+      (runtimeConfig.botConfig as { observe?: { useHotRegimeTracking?: unknown } } | undefined)?.observe?.useHotRegimeTracking,
+    );
+    setHotRegimeMode(nextMode);
+    return runtimeConfig;
+  };
 
   useEffect(() => {
     requestEventsTail(100);
   }, [requestEventsTail]);
 
   useEffect(() => {
+    requestRowsRefresh("snapshot", {
+      detail: "signals",
+      shortSignalFilters: rowFilters,
+    });
+  }, [requestRowsRefresh, rowFilters]);
+
+  useEffect(() => {
     let active = true;
     const load = async () => {
       setPresetLoading(true);
       setPresetError(null);
+      setControlsError(null);
       try {
-        const response = await fetchSignalPresets();
+        const [response] = await Promise.all([
+          fetchSignalPresets(),
+          loadHotRegimeMode(),
+        ]);
         if (!active) return;
         setPresets(response.presets);
         setSelectedPresetId(response.selectedPresetId ?? response.presets[0]?.id ?? null);
-        setDraftThresholds(response.currentThresholds);
+        setDraftThresholds(resolvePresetDraftThresholds(response));
+        setAppliedThresholds(structuredClone(response.currentThresholds));
         const selectedPreset = response.presets.find((preset) => preset.id === response.selectedPresetId) ?? null;
         setPresetName(selectedPreset?.name ?? "Custom");
       } catch (error) {
@@ -142,7 +236,8 @@ export function ShortSignalsPage() {
   }) {
     setPresets(response.presets);
     setSelectedPresetId(response.selectedPresetId ?? response.presets[0]?.id ?? null);
-    setDraftThresholds(response.currentThresholds);
+    setDraftThresholds(resolvePresetDraftThresholds(response));
+    setAppliedThresholds(structuredClone(response.currentThresholds));
     const selectedPreset = response.presets.find((preset) => preset.id === response.selectedPresetId) ?? null;
     setPresetName(selectedPreset?.name ?? presetName);
   }
@@ -215,19 +310,66 @@ export function ShortSignalsPage() {
   };
 
   const handleApplyPreset = async () => {
-    if (!draftThresholds) return;
+    if (!draftThresholds || hotRegimeBusy) return;
     setPresetBusyAction("apply");
     setPresetError(null);
+    setControlsError(null);
     try {
       const response = await applySignalPreset({
         selectedPresetId,
         thresholds: draftThresholds,
       });
       applyPresetResponse(response);
+      await Promise.all([
+        loadHotRegimeMode(),
+        refresh(true),
+      ]);
+      requestRowsRefresh("snapshot", {
+        detail: "signals",
+        shortSignalFilters: rowFilters,
+      });
     } catch (error) {
       setPresetError(String((error as Error)?.message ?? error));
     } finally {
       setPresetBusyAction("none");
+    }
+  };
+
+  const handleHotRegimeToggle = async (checked: boolean) => {
+    if (hotRegimeBusy) return;
+    setHotRegimeBusy(true);
+    setControlsError(null);
+    try {
+      if (status.sessionState !== "STOPPED") {
+        await stopSession();
+        const deadlineMs = Date.now() + 10_000;
+        while (Date.now() < deadlineMs) {
+          const nextStatus = await fetchStatus();
+          if (nextStatus.sessionState === "STOPPED") {
+            break;
+          }
+          await sleep(250);
+        }
+      }
+      await updateRuntimeConfig({
+        botConfig: {
+          observe: {
+            useHotRegimeTracking: checked,
+          },
+        },
+      });
+      await Promise.all([
+        loadHotRegimeMode(),
+        refresh(true),
+      ]);
+      requestRowsRefresh("snapshot", {
+        detail: "signals",
+        shortSignalFilters: rowFilters,
+      });
+    } catch (error) {
+      setControlsError(String((error as Error)?.message ?? error));
+    } finally {
+      setHotRegimeBusy(false);
     }
   };
 
@@ -244,7 +386,10 @@ export function ShortSignalsPage() {
   const signalEventCountBySymbol = useMemo(() => {
     const counts = new Map<string, number>();
     const seen = new Set<string>();
-    for (const event of [...events, ...eventStream]) {
+    for (const event of [
+      ...(Array.isArray(events) ? events : []),
+      ...(Array.isArray(eventStream) ? eventStream : []),
+    ]) {
       const type = normalizeState(event.type);
       const symbol = String(event.symbol ?? "").trim().toUpperCase();
       if (!SHORT_SIGNAL_EVENT_TYPES.has(type) || !symbol) continue;
@@ -258,20 +403,19 @@ export function ShortSignalsPage() {
 
   const recentSignals = useMemo(
     () =>
-      rows
+      (Array.isArray(rows) ? rows : [])
         .filter(isActiveShortSignalRow)
-        .filter((row) => !hideRejected || !isRejectedState(row.shortSignalState))
         .slice()
         .sort(
           (left, right) =>
             Number(right.updatedAt ?? 0) - Number(left.updatedAt ?? 0),
         )
         .slice(0, 10),
-    [hideRejected, rows],
+    [rows],
   );
 
   const filteredWatchlist = useMemo(() => {
-    return rows
+    return (Array.isArray(rows) ? rows : [])
       .filter((row) => Number.isFinite(row.shortOiMove5mPct as number))
       .map<ShortOiSpikeWatchlistRecord>((row) => ({
         symbol: row.symbol,
@@ -286,7 +430,6 @@ export function ShortSignalsPage() {
         signalOrdinal: Number(signalEventCountBySymbol.get(row.symbol) ?? 0),
         coinglassUrl: buildCoinGlassUrl(row.symbol),
       }))
-      .filter((row) => !hideRejected || !isRejectedState(row.shortSignalState))
       .sort((left, right) => {
         const delta =
           Math.abs(Number(right.oiMove5mPct ?? 0)) -
@@ -295,13 +438,16 @@ export function ShortSignalsPage() {
         return left.symbol.localeCompare(right.symbol);
       })
       .slice(0, 10);
-  }, [hideRejected, rows, signalEventCountBySymbol]);
+  }, [rows, signalEventCountBySymbol]);
 
   const recentEvents = useMemo(
     () =>
-      [...events, ...eventStream]
+      [
+        ...(Array.isArray(events) ? events : []),
+        ...(Array.isArray(eventStream) ? eventStream : []),
+      ]
         .filter((event) => SHORT_SIGNAL_EVENT_TYPES.has(normalizeState(event.type)))
-        .filter((event) => !hideRejected || !isRejectedShortEvent(event))
+        .filter((event) => shouldShowState(resolveEventState(event), rowFilters))
         .sort((left, right) => Number(right.ts ?? 0) - Number(left.ts ?? 0))
         .filter(
           (event, index, arr) =>
@@ -313,7 +459,21 @@ export function ShortSignalsPage() {
             ) === index,
         )
         .slice(0, 10),
-    [eventStream, events, hideRejected],
+    [eventStream, events, rowFilters],
+  );
+
+  const controlsBusy = hotRegimeBusy || presetBusyAction === "apply";
+  const appliedPresetId = useMemo(
+    () => resolveAppliedPresetId({ presets, currentThresholds: appliedThresholds }),
+    [appliedThresholds, presets],
+  );
+  const appliedPreset = useMemo(
+    () => presets.find((preset) => preset.id === appliedPresetId) ?? null,
+    [appliedPresetId, presets],
+  );
+  const isDraftApplied = useMemo(
+    () => serializeThresholds(draftThresholds) === serializeThresholds(appliedThresholds),
+    [appliedThresholds, draftThresholds],
   );
 
   return (
@@ -325,10 +485,10 @@ export function ShortSignalsPage() {
         wsUrl={wsUrl}
         lastServerTime={lastServerTime}
         streams={streams}
-        canStart={canStart}
-        canStop={canStop}
-        canPause={canPause}
-        canResume={canResume}
+        canStart={canStart && !controlsBusy}
+        canStop={canStop && !controlsBusy}
+        canPause={canPause && !controlsBusy}
+        canResume={canResume && !controlsBusy}
         busy={busy}
         onStart={() => void start()}
         onStop={() => void stop()}
@@ -339,19 +499,6 @@ export function ShortSignalsPage() {
         onReset={() => void handleReset()}
       />
       <Container fluid className="py-3 px-2">
-        <Card className="genesis-card mb-3">
-          <Card.Body className="py-2 px-3 d-flex align-items-center justify-content-end">
-            <Form.Check
-              type="checkbox"
-              id="short-signals-hide-rejected-global"
-              label="hide rejected"
-              checked={hideRejected}
-              onChange={(event) => setHideRejected(event.currentTarget.checked)}
-              className="mb-0 user-select-none"
-            />
-          </Card.Body>
-        </Card>
-
         <Row className="g-3">
           <Col xs={12}>
             <SignalPresetEditorCard
@@ -359,16 +506,59 @@ export function ShortSignalsPage() {
               selectedPresetId={selectedPresetId}
               presetName={presetName}
               thresholds={draftThresholds}
+              activePresetId={appliedPresetId}
+              activePresetName={appliedPreset?.name ?? null}
+              isDraftApplied={isDraftApplied}
               loading={presetLoading}
               busyAction={presetBusyAction}
+              controlsDisabled={hotRegimeBusy}
               error={presetError}
+              hotRegimeMode={hotRegimeMode}
+              hotRegimeBusy={hotRegimeBusy}
+              hotRegimeError={controlsError}
               onPresetSelect={handlePresetSelect}
               onPresetNameChange={setPresetName}
               onThresholdChange={handleThresholdChange}
               onSave={() => void handleSavePreset()}
               onDelete={() => void handleDeletePreset()}
               onApply={() => void handleApplyPreset()}
+              onHotRegimeToggle={(checked) => void handleHotRegimeToggle(checked)}
             />
+          </Col>
+
+          <Col xs={12}>
+            <Card className="genesis-card">
+              <Card.Body className="py-3 px-3">
+                <div className="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3">
+                  <div>
+                    <div className="fw-semibold">Signal state filters</div>
+                    <div className="small text-secondary">
+                      Checked means the state is visible in the tables.
+                    </div>
+                  </div>
+
+                  <div className="d-flex flex-wrap gap-3 justify-content-lg-end">
+                    {SIGNAL_STATE_FILTER_FIELDS.map((field) => (
+                      <Form.Check
+                        key={field.key}
+                        type="checkbox"
+                        id={field.id}
+                        label={field.label}
+                        checked={rowFilters[field.key]}
+                        onChange={(event) => {
+                          const checked = event.currentTarget.checked;
+                          setRowFilters((prev) => ({
+                            ...prev,
+                            [field.key]: checked,
+                          }));
+                        }}
+                        className="mb-0 user-select-none"
+                      />
+                    ))}
+                  </div>
+                </div>
+              </Card.Body>
+            </Card>
           </Col>
 
           <Col xl={6}>

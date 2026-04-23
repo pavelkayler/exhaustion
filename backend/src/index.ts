@@ -150,12 +150,12 @@ function shouldAutoStartRuntime(): boolean {
   const raw = String(
     process.env.AUTO_START_RUNTIME ??
       process.env.AUTO_START_SESSION ??
-      "1",
+      "0",
   )
     .trim()
     .toLowerCase();
 
-  return raw !== "0" && raw !== "false" && raw !== "off" && raw !== "no";
+  return raw === "1" || raw === "true" || raw === "on" || raw === "yes";
 }
 
 async function autoStartRuntime(app: Awaited<ReturnType<typeof buildApp>>) {

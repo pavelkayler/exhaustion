@@ -42,6 +42,7 @@
 ## Follow-up notes
 - candidate-threshold fix and built-in pump-fade presets: `docs/50_candidate_threshold_fix_and_pump_fade_presets.md`
 - aggressive built-in pump-fade presets for higher Candidate frequency: `docs/51_aggressive_pump_fade_presets.md`
+- switchable legacy vs hot-regime short tracking mode: `docs/52_hot_regime_tracking_mode.md`
 
 ## Removed backend source files
 - `backend/src/analytics/shortSignalMinuteBarStore.ts`

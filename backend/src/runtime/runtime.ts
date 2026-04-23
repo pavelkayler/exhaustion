@@ -648,13 +648,23 @@ export class Runtime extends EventEmitter {
       this.logSessionStopRequested("start_wait_for_ready_failed", {
         reason: err instanceof Error ? err.message : String(err),
       });
+      this.runtimeMessage = err instanceof Error ? err.message : String(err);
+      this.transitionState("STOPPED");
+      this.logger?.log({
+        ts: Date.now(),
+        type: "SESSION_STOP",
+        payload: {
+          sessionId: this.sessionId,
+          stopDurationMs: 0,
+          source: "start_wait_for_ready_failed",
+          runtimeMessage: this.runtimeMessage,
+        },
+      });
       this.stopTransientBrokers();
       await this.closeLoggerSafely();
       this.demoStartedAtMs = null;
       this.runningSinceMs = null;
-      this.runtimeMessage = err instanceof Error ? err.message : String(err);
       this.runContext = null;
-      this.transitionState("STOPPED");
       const status = this.getStatus();
       this.emit("state", status);
       return status;
@@ -666,12 +676,23 @@ export class Runtime extends EventEmitter {
         activeRunId: this.runContext?.runId ?? null,
         expectedRunId: runId,
       });
+      this.runtimeMessage = "start_aborted_after_ready";
+      this.transitionState("STOPPED");
+      this.logger?.log({
+        ts: Date.now(),
+        type: "SESSION_STOP",
+        payload: {
+          sessionId: this.sessionId,
+          stopDurationMs: 0,
+          source: "start_aborted_after_ready",
+          runtimeMessage: this.runtimeMessage,
+        },
+      });
       this.stopTransientBrokers();
       await this.closeLoggerSafely();
       this.demoStartedAtMs = null;
       this.runningSinceMs = null;
       this.runContext = null;
-      this.transitionState("STOPPED");
       const status = this.getStatus();
       this.emit("state", status);
       return status;
@@ -852,8 +873,14 @@ export class Runtime extends EventEmitter {
       return status;
     })();
 
+    const stopRunId = this.runContext?.runId ?? this.sessionId;
+    let stopOverallTimer: ReturnType<typeof setTimeout> | null = null;
     const timeoutPromise = new Promise<Status>((resolve) => {
-      setTimeout(() => {
+      stopOverallTimer = setTimeout(() => {
+        const currentRunId = this.runContext?.runId ?? this.sessionId;
+        if (currentRunId !== stopRunId) {
+          return;
+        }
         if (this.sessionState !== "STOPPED") {
           this.logSessionStopRequested("stop_timeout_fallback", { originalSource: reason });
           this.stopTransientBrokers();
@@ -872,6 +899,9 @@ export class Runtime extends EventEmitter {
     try {
       return await Promise.race([this.stopPromise, timeoutPromise]);
     } finally {
+      if (stopOverallTimer) {
+        clearTimeout(stopOverallTimer);
+      }
       this.stopPromise = null;
     }
   }

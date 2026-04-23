@@ -61,6 +61,7 @@ export type ShortExhaustionBotConfig = {
     logCandidateTransitions: boolean;
     logWatchlistTransitions: boolean;
     logFinalSignals: boolean;
+    useHotRegimeTracking: boolean;
     totalScoreMin: number;
     minLogIntervalSec: number;
     signalVersion: string;
@@ -170,6 +171,7 @@ function normalizeShortExhaustionBotConfig(raw: unknown): ShortExhaustionBotConf
       logCandidateTransitions: Boolean(observe.logCandidateTransitions ?? true),
       logWatchlistTransitions: Boolean(observe.logWatchlistTransitions ?? true),
       logFinalSignals: Boolean(observe.logFinalSignals ?? true),
+      useHotRegimeTracking: Boolean(observe.useHotRegimeTracking ?? false),
       totalScoreMin: Math.max(0, toFinite(observe.totalScoreMin, 2.75)),
       minLogIntervalSec: toInt(observe.minLogIntervalSec, 30, 1, 86_400),
       signalVersion: String(observe.signalVersion ?? "short-exhaustion-v1").trim() || "short-exhaustion-v1",
@@ -257,6 +259,7 @@ const CURRENT_BOT: BotRegistryEntry = {
       logCandidateTransitions: true,
       logWatchlistTransitions: true,
       logFinalSignals: true,
+      useHotRegimeTracking: false,
       totalScoreMin: 2.75,
       minLogIntervalSec: 30,
       signalVersion: "short-exhaustion-v1",

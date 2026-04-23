@@ -472,7 +472,9 @@ export function registerHttpRoutes(app: FastifyInstance) {
       const body = ((req.body ?? {}) as Record<string, unknown>) ?? {};
       const thresholds = normalizeSignalThresholds(body.thresholds, configStore.get().botConfig);
       const selectedPresetId = String(body.selectedPresetId ?? "").trim() || "custom";
+      const currentConfig = configStore.get();
       const wasRunning = runtime.getStatus().sessionState !== "STOPPED";
+      const executorWasRunning = getExecutionExecutorState().desiredRunning;
 
       if (selectedPresetId !== "custom") {
         const selectedPreset = signalPresetStore.getById(selectedPresetId);
@@ -485,13 +487,29 @@ export function registerHttpRoutes(app: FastifyInstance) {
         }
       }
 
+      if (executorWasRunning) {
+        await stopExecutionExecutor();
+      }
+
       if (wasRunning) {
         await runtime.stop("signal_preset_apply");
       }
 
+      const botConfigPatch = buildBotConfigPatchFromThresholds(thresholds) as Record<string, unknown>;
+      const observePatch = (
+        botConfigPatch.observe && typeof botConfigPatch.observe === "object"
+          ? botConfigPatch.observe
+          : {}
+      ) as Record<string, unknown>;
       const nextConfig = configStore.update({
         selectedBotPresetId: selectedPresetId,
-        botConfig: buildBotConfigPatchFromThresholds(thresholds),
+        botConfig: {
+          ...botConfigPatch,
+          observe: {
+            ...observePatch,
+            useHotRegimeTracking: currentConfig.botConfig.observe.useHotRegimeTracking,
+          },
+        },
       });
       configStore.persist();
 
@@ -503,6 +521,7 @@ export function registerHttpRoutes(app: FastifyInstance) {
         config: nextConfig,
         status: runtime.getStatus(),
         stopped: wasRunning,
+        executorStopped: executorWasRunning,
         requiresManualStart: true,
       };
     } catch (error) {

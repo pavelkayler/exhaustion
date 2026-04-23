@@ -6,6 +6,7 @@ import type {
   ConnStatus,
   LogEvent,
   SessionState,
+  ShortSignalRowsFilter,
   StreamsState,
   SymbolRow,
   WsMessage,
@@ -14,11 +15,17 @@ import type {
 import { computeReconnectDelay } from "../utils/wsBackoff";
 import { appendEventWithDedupe, dedupeEvents } from "../utils/eventDedupe";
 
+type RowsDetail = "full" | "preview" | "signals";
+
 type ClientWsMessage =
   | { type: "events_tail_request"; payload: { limit: number } }
   | {
       type: "rows_refresh_request";
-      payload?: { mode?: "tick" | "snapshot"; detail?: "full" | "preview" };
+      payload?: {
+        mode?: "tick" | "snapshot";
+        detail?: RowsDetail;
+        shortSignalFilters?: ShortSignalRowsFilter;
+      };
     }
   | { type: "streams_toggle_request" }
   | { type: "streams_apply_subscriptions_request" }
@@ -48,6 +55,12 @@ const EMPTY_BOT_STATS: BotStats = {
 const EVENT_STREAM_MAX = 1000;
 const RPC_TIMEOUT_MS = 15_000;
 const RPC_PROBE_TIMEOUT_MS = 700;
+const DEFAULT_SHORT_SIGNAL_ROWS_FILTER: ShortSignalRowsFilter = {
+  showRejected: true,
+  showCandidate: true,
+  showWatchlist: true,
+  showFinal: true,
+};
 
 type WsFeedState = {
   conn: ConnStatus;
@@ -90,6 +103,12 @@ let liteEmitTimer: number | null = null;
 let nextRpcId = 1;
 let rpcSupportState: RpcSupportState = "unknown";
 let rpcProbePromise: Promise<boolean> | null = null;
+let currentRowsRequest: {
+  detail: RowsDetail;
+  shortSignalFilters?: ShortSignalRowsFilter;
+} = {
+  detail: "full",
+};
 
 let state: WsFeedState = {
   conn: "CONNECTING",
@@ -189,6 +208,37 @@ function send(msg: ClientWsMessage) {
   } catch {
     return;
   }
+}
+
+function setCurrentRowsRequest(args?: {
+  detail?: RowsDetail;
+  shortSignalFilters?: ShortSignalRowsFilter;
+}) {
+  const detail = args?.detail ?? currentRowsRequest.detail ?? "full";
+  currentRowsRequest = {
+    detail,
+    ...(detail === "signals"
+      ? {
+          shortSignalFilters: {
+            ...DEFAULT_SHORT_SIGNAL_ROWS_FILTER,
+            ...(args?.shortSignalFilters ?? currentRowsRequest.shortSignalFilters ?? {}),
+          },
+        }
+      : {}),
+  };
+}
+
+function sendCurrentRowsRequest(mode: "tick" | "snapshot" = "snapshot") {
+  send({
+    type: "rows_refresh_request",
+    payload: {
+      mode,
+      detail: currentRowsRequest.detail,
+      ...(currentRowsRequest.detail === "signals" && currentRowsRequest.shortSignalFilters
+        ? { shortSignalFilters: currentRowsRequest.shortSignalFilters }
+        : {}),
+    },
+  });
 }
 
 function flushOpenWaiters() {
@@ -359,10 +409,7 @@ function connect(kind: "CONNECTING" | "RECONNECTING") {
     patchState({ conn: "CONNECTED" });
     send({ type: "events_tail_request", payload: { limit: eventsLimit } });
     if (listeners.size > 0) {
-      send({
-        type: "rows_refresh_request",
-        payload: { mode: "snapshot", detail: "full" },
-      });
+      sendCurrentRowsRequest("snapshot");
     }
     flushOpenWaiters();
   };
@@ -563,24 +610,25 @@ export function useWsFeedLite() {
   };
 }
 
-export function useWsFeed() {
+export function useWsFeed(options?: {
+  initialRowsRequest?: {
+    detail?: RowsDetail;
+    shortSignalFilters?: ShortSignalRowsFilter;
+  };
+}) {
   const [localState, setLocalState] = useState<WsFeedState>(state);
 
   useEffect(() => {
     ensureStarted();
     listeners.add(setLocalState);
     setLocalState(state);
-    send({
-      type: "rows_refresh_request",
-      payload: { mode: "snapshot", detail: "full" },
-    });
+    setCurrentRowsRequest(options?.initialRowsRequest ?? { detail: "full" });
+    sendCurrentRowsRequest("snapshot");
     return () => {
       listeners.delete(setLocalState);
       if (listeners.size === 0) {
-        send({
-          type: "rows_refresh_request",
-          payload: { mode: "snapshot", detail: "preview" },
-        });
+        setCurrentRowsRequest({ detail: "preview" });
+        sendCurrentRowsRequest("snapshot");
       }
     };
   }, []);
@@ -592,11 +640,17 @@ export function useWsFeed() {
   }, []);
 
   const requestRowsRefresh = useCallback(
-    (mode: "tick" | "snapshot" = "tick") => {
-      send({
-        type: "rows_refresh_request",
-        payload: { mode, detail: "full" },
-      });
+    (
+      mode: "tick" | "snapshot" = "tick",
+      options?: {
+        detail?: RowsDetail;
+        shortSignalFilters?: ShortSignalRowsFilter;
+      },
+    ) => {
+      if (options) {
+        setCurrentRowsRequest(options);
+      }
+      sendCurrentRowsRequest(mode);
     },
     [],
   );

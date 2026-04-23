@@ -21,6 +21,7 @@ import { TradeActivityWindowStore } from "../engine/TradeActivityWindowStore.js"
 import { runtime } from "../runtime/runtime.js";
 import { runtimeDiagnostics } from "../runtime/runtimeDiagnostics.js";
 import { setMarketStreamsRuntimeStatus } from "../runtime/marketStreamsStatus.js";
+import { filterTradableShortSymbols } from "../runtime/shortSymbolExclusions.js";
 import type { LogEvent } from "../logging/EventLogger.js";
 import { configStore, type RuntimeConfig } from "../runtime/configStore.js";
 import { LiveUpdateAggregator } from "./liveUpdateAggregator.js";
@@ -48,6 +49,12 @@ import { shortResearchRecorder } from "../shortResearch/storage/ShortResearchRec
 import { shortBybitOiSeedStore } from "../shortResearch/storage/ShortBybitOiSeedStore.js";
 import { shortLiveSetupStore } from "../shortResearch/storage/ShortLiveSetupStore.js";
 import { appendBybitWsIncident } from "./bybitWsIncidentStore.js";
+import {
+  applyHotRegimeTrackingSnapshot,
+  buildShortCandidateSignature,
+  isHotRegimeTrackingEnabled,
+  shouldSuppressRepeatedCandidateCluster,
+} from "./shortHotRegimeTracking.js";
 
 type AwaitAllStreamsConnectedArgs = {
   timeoutMs: number;
@@ -343,6 +350,27 @@ let shortSignalsRowsSnapshotProvider: (() => SymbolRow[]) | null = null;
 const shortSignalEventCountBySymbol = new Map<string, number>();
 let shortSignalEventCountSessionId: string | null = null;
 
+type RowsDetail = "full" | "preview" | "signals";
+
+type ShortSignalRowsFilter = {
+  showRejected: boolean;
+  showCandidate: boolean;
+  showWatchlist: boolean;
+  showFinal: boolean;
+};
+
+type ClientRowsRequestState = {
+  detail: RowsDetail;
+  shortSignalFilters: ShortSignalRowsFilter;
+};
+
+const DEFAULT_SHORT_SIGNAL_ROWS_FILTER: ShortSignalRowsFilter = {
+  showRejected: true,
+  showCandidate: true,
+  showWatchlist: true,
+  showFinal: true,
+};
+
 export function setOptimizerSnapshotProvider(provider: (() => OptimizerSnapshot) | null) {
   optimizerSnapshotProvider = provider;
 }
@@ -367,7 +395,14 @@ export function getShortSignalEventCountBySymbolSnapshot(): Record<string, numbe
 
 type ClientWsMessage =
   | { type: "events_tail_request"; payload: { limit: number } }
-  | { type: "rows_refresh_request"; payload?: { mode?: "tick" | "snapshot"; detail?: "full" | "preview" } }
+  | {
+      type: "rows_refresh_request";
+      payload?: {
+        mode?: "tick" | "snapshot";
+        detail?: RowsDetail;
+        shortSignalFilters?: Partial<ShortSignalRowsFilter>;
+      };
+    }
   | { type: "streams_toggle_request" }
   | { type: "streams_apply_subscriptions_request" };
 
@@ -395,6 +430,26 @@ function getOptimizerSnapshot(): OptimizerSnapshot {
   }
 }
 
+function normalizeShortSignalRowsFilter(value: unknown): ShortSignalRowsFilter {
+  const raw = (value && typeof value === "object" ? value : {}) as Partial<ShortSignalRowsFilter>;
+  return {
+    showRejected: raw.showRejected !== false,
+    showCandidate: raw.showCandidate !== false,
+    showWatchlist: raw.showWatchlist !== false,
+    showFinal: raw.showFinal !== false,
+  };
+}
+
+function createClientRowsRequestState(value?: {
+  detail?: RowsDetail;
+  shortSignalFilters?: Partial<ShortSignalRowsFilter>;
+}): ClientRowsRequestState {
+  return {
+    detail: value?.detail ?? "preview",
+    shortSignalFilters: normalizeShortSignalRowsFilter(value?.shortSignalFilters),
+  };
+}
+
 function safeSend(ws: WebSocket, msg: ServerWsMessage) {
   try {
     if (ws.readyState === 1) ws.send(JSON.stringify(msg));
@@ -417,8 +472,16 @@ function safeParseClientMsg(raw: string): ClientWsMessage | null {
       const modeRaw = obj?.payload?.mode;
       const mode = modeRaw === "snapshot" ? "snapshot" : "tick";
       const detailRaw = obj?.payload?.detail;
-      const detail = detailRaw === "full" ? "full" : "preview";
-      return { type: "rows_refresh_request", payload: { mode, detail } };
+      const detail: RowsDetail =
+        detailRaw === "full" || detailRaw === "signals" ? detailRaw : "preview";
+      return {
+        type: "rows_refresh_request",
+        payload: {
+          mode,
+          detail,
+          shortSignalFilters: normalizeShortSignalRowsFilter(obj?.payload?.shortSignalFilters),
+        },
+      };
     }
 
     if (obj?.type === "streams_toggle_request") {
@@ -440,6 +503,43 @@ function isShortSignalEventType(value: unknown): boolean {
   return type === "SHORT_SIGNAL_TRANSITION" || type === "SHORT_SIGNAL_TRIGGER";
 }
 
+function normalizeShortSignalState(value: unknown): string {
+  return String(value ?? "").trim().toUpperCase();
+}
+
+function isRejectedShortSignalState(value: unknown): boolean {
+  return normalizeShortSignalState(value) === "REJECTED";
+}
+
+function isWatchlistShortSignalState(value: unknown): boolean {
+  return normalizeShortSignalState(value) === "WATCHLIST";
+}
+
+function isCandidateShortSignalState(value: unknown): boolean {
+  return normalizeShortSignalState(value) === "CANDIDATE";
+}
+
+function isFinalShortSignalState(value: unknown): boolean {
+  const state = normalizeShortSignalState(value);
+  return state === "FINAL" || state === "SOFT_FINAL";
+}
+
+function isActiveShortSignalRow(row: Pick<SymbolRow, "shortSignalState">): boolean {
+  const state = normalizeShortSignalState(row.shortSignalState);
+  return state !== "" && state !== "IDLE" && state !== "EXPIRED";
+}
+
+function shouldIncludeShortSignalRowByFilter(
+  row: Pick<SymbolRow, "shortSignalState">,
+  filters: ShortSignalRowsFilter,
+): boolean {
+  if (isRejectedShortSignalState(row.shortSignalState)) return filters.showRejected;
+  if (isCandidateShortSignalState(row.shortSignalState)) return filters.showCandidate;
+  if (isWatchlistShortSignalState(row.shortSignalState)) return filters.showWatchlist;
+  if (isFinalShortSignalState(row.shortSignalState)) return filters.showFinal;
+  return true;
+}
+
 const BYBIT_PUBLIC_ARGS_CHAR_LIMIT = 18_000;
 const BYBIT_MAX_TOPICS_PER_CONNECTION = 160;
 const BYBIT_WS_RECONNECT_DELAYS_MS = [2_000, 5_000, 10_000, 20_000, 30_000] as const;
@@ -452,7 +552,6 @@ const BASE_ROWS_CACHE_MAX_AGE_MS = 60_000;
 const STREAM_GUARD_INTERVAL_MS = 5_000;
 const EVENT_LOOP_LAG_STALE_GRACE_CAP_MS = 30_000;
 const SHORT_CANDIDATE_CLUSTER_WINDOW_MS = 10 * 60_000;
-const SHORT_CANDIDATE_REPEAT_MIN_SCORE_DELTA = 0.35;
 
 type ReconnectTarget = {
   reason: string;
@@ -524,12 +623,7 @@ function sumTopicChars(topics: string[]): number {
 
 function normalizeSymbols(raw: unknown): string[] {
   if (!Array.isArray(raw)) return [];
-  const unique = new Set<string>();
-  for (const item of raw) {
-    const symbol = String(item ?? "").trim();
-    if (symbol) unique.add(symbol);
-  }
-  return Array.from(unique);
+  return filterTradableShortSymbols(raw);
 }
 
 function resolveTradingSymbols(cfg: RuntimeConfig): string[] {
@@ -538,6 +632,26 @@ function resolveTradingSymbols(cfg: RuntimeConfig): string[] {
 
 function readShortExhaustionConfig(cfg: RuntimeConfig): ShortExhaustionBotConfig {
   return cfg.botConfig as ShortExhaustionBotConfig;
+}
+
+export const HOT_MODE_ORDERBOOK_STICKY_MS = 15 * 60_000;
+
+export function isHotModeOrderbookPromotedState(state: ShortExhaustionSignalState | null | undefined): boolean {
+  return state === "CANDIDATE" || state === "CONFIRMED" || state === "SOFT_FINAL" || state === "FINAL";
+}
+
+export function resolveHotModeOrderbookSymbols(
+  tradingSymbols: string[],
+  promotionExpiries: ReadonlyMap<string, number>,
+  nowMsValue: number,
+): string[] {
+  const now = Number.isFinite(nowMsValue) ? Math.floor(nowMsValue) : 0;
+  return normalizeSymbols(tradingSymbols).filter((symbol) => (promotionExpiries.get(symbol) ?? 0) > now);
+}
+
+function isHotModeOrderbookStagingEnabled(cfg: RuntimeConfig): boolean {
+  return cfg.selectedBotId === SHORT_EXHAUSTION_BOT_ID
+    && isHotRegimeTrackingEnabled(readShortExhaustionConfig(cfg));
 }
 
 function parseOrderbookTopic(topic: string): string | null {
@@ -606,7 +720,7 @@ async function ensureRecorderSeededSymbols(force = false): Promise<string[]> {
   return recorderSeedPromise;
 }
 
-type SubscriptionTargets = {
+export type SubscriptionTargets = {
   tradingSymbols: string[];
   recorderSymbols: string[];
   tickerSymbols: string[];
@@ -645,7 +759,7 @@ function resolveSubscriptionTargets(
   };
 }
 
-function buildBybitTopics(cfg: RuntimeConfig, targets: SubscriptionTargets): string[] {
+export function buildBybitTopics(cfg: RuntimeConfig, targets: SubscriptionTargets): string[] {
   const topics: string[] = [];
   const klineTopics = new Set<string>();
   const shortObserveScope = cfg.selectedBotId === SHORT_EXHAUSTION_BOT_ID;
@@ -653,32 +767,36 @@ function buildBybitTopics(cfg: RuntimeConfig, targets: SubscriptionTargets): str
     || cvdRecorder.getStatus().mode !== "off";
   const includeLiquidations = shortObserveScope;
   const includeOrderbook = shortObserveScope;
-  for (const s of targets.tickerSymbols) {
+  const tickerSymbols = normalizeSymbols(targets.tickerSymbols);
+  const tradingSymbols = normalizeSymbols(targets.tradingSymbols);
+  const recorderSymbols = normalizeSymbols(targets.recorderSymbols);
+  const publicTradeSymbols = normalizeSymbols(targets.publicTradeSymbols);
+  const liquidationSymbols = normalizeSymbols(targets.liquidationSymbols);
+  const orderbookSymbols = normalizeSymbols(targets.orderbookSymbols);
+  for (const s of tickerSymbols) {
     topics.push(`tickers.${s}`);
   }
-  for (const s of targets.tradingSymbols) {
+  for (const s of tradingSymbols) {
     klineTopics.add(`kline.${targets.tradingKlineTf}.${s}`);
   }
-  for (const s of targets.recorderSymbols) {
+  for (const s of recorderSymbols) {
     klineTopics.add(`kline.1.${s}`);
   }
   topics.push(...klineTopics);
   if (includePublicTrade) {
     const symbols = shortObserveScope
       ? normalizeSymbols([
-        ...targets.tradingSymbols,
-        ...(cvdRecorder.getStatus().mode !== "off" ? targets.recorderSymbols : []),
+        ...publicTradeSymbols,
+        ...(cvdRecorder.getStatus().mode !== "off" ? recorderSymbols : []),
       ])
-      : targets.publicTradeSymbols;
+      : publicTradeSymbols;
     for (const s of symbols) topics.push(`publicTrade.${s}`);
   }
   if (includeLiquidations) {
-    const symbols = shortObserveScope ? targets.tradingSymbols : targets.liquidationSymbols;
-    for (const s of symbols) topics.push(`allLiquidation.${s}`);
+    for (const s of liquidationSymbols) topics.push(`allLiquidation.${s}`);
   }
   if (includeOrderbook) {
-    const symbols = shortObserveScope ? targets.tradingSymbols : targets.orderbookSymbols;
-    for (const s of symbols) topics.push(`orderbook.50.${s}`);
+    for (const s of orderbookSymbols) topics.push(`orderbook.50.${s}`);
   }
   return topics;
 }
@@ -722,6 +840,11 @@ type ShortSignalGateState = {
   clusterMaxSqueezeRiskScore: number;
   clusterSawLiquidityFloor: boolean;
   clusterSawDerivativesWeak: boolean;
+  hotRegimeActive: boolean;
+  hotRegimeEnteredAtMs: number;
+  hotRegimeLastActiveAtMs: number;
+  hotRegimeUntilMs: number;
+  orderbookPromotedUntilMs: number;
 };
 
 function pctChange(now: number | null | undefined, ref: number | null | undefined): number | null {
@@ -787,7 +910,7 @@ function readJsonlTail(filePath: string, limit: number): LogEvent[] {
 export function createWsHub(app: FastifyInstance) {
   const clients = new Set<WebSocket>();
   const clientEventsLimit = new Map<WebSocket, number>();
-  const clientRowsDetail = new Map<WebSocket, "full" | "preview">();
+  const clientRowsRequest = new Map<WebSocket, ClientRowsRequestState>();
 
   const cache = new BybitMarketCache();
   const candles = new CandleTracker(cache);
@@ -826,6 +949,7 @@ export function createWsHub(app: FastifyInstance) {
     symbols: string[];
   } | null = null;
   const shortSignalGateBySymbol = new Map<string, ShortSignalGateState>();
+  let lastHotModeOrderbookScopeKey = "";
   let sessionConfigSnapshot: RuntimeConfig | null = null;
   const pendingTickerBySymbol = new Map<string, PendingTickerUpdate>();
   const pendingOrderbookBySymbol = new Map<string, PendingOrderbookUpdate>();
@@ -1097,8 +1221,8 @@ export function createWsHub(app: FastifyInstance) {
       const now = nowMs();
       const { rows: availableWsRows, symbols: availableWsSymbols } = buildAvailableWsSnapshot();
       for (const c of clients) {
-        const detail = clientRowsDetail.get(c) ?? "preview";
-        const rows = computeRowsForClient(now, detail);
+        const request = clientRowsRequest.get(c) ?? createClientRowsRequestState();
+        const rows = computeRowsForClient(now, request);
         if (!rows.length && !(streamsEnabled || bybitConnected || rowsAllowed())) continue;
         const botStats = clientRowsCache?.rows === rows ? clientRowsCache.botStats : computeBotStats(rows);
         const msg: ServerWsMessage = { type: "tick", payload: { serverTime: now, rows, botStats, ...getUniverseInfo(getEffectiveConfig()), availableWsSymbols, availableWsRows } };
@@ -1192,7 +1316,7 @@ export function createWsHub(app: FastifyInstance) {
   }
 
   function buildBybitTopicShards(cfg: RuntimeConfig, runtimeActive: boolean, recorderMode: "off" | "record_only" | "record_while_running", cvdMode: "off" | "record_only" | "record_while_running", marketMode: "off" | "record_only" | "record_while_running") {
-    const targets = resolveSubscriptionTargets(cfg, runtimeActive, recorderMode, cvdMode, marketMode);
+    const targets = readCurrentSubscriptionTargets(cfg, runtimeActive, recorderMode, cvdMode, marketMode);
     const topics = buildBybitTopics(cfg, targets);
     const shards = chunkTopicsByCharLimit(topics).map((shardTopics, index) => ({
       key: `linear-${index + 1}`,
@@ -1226,7 +1350,7 @@ export function createWsHub(app: FastifyInstance) {
     marketMode: "off" | "record_only" | "record_while_running",
   ): string {
     const cfg = getEffectiveConfig();
-    const targets = resolveSubscriptionTargets(cfg, runtimeActive, recorderMode, cvdMode, marketMode);
+    const targets = readCurrentSubscriptionTargets(cfg, runtimeActive, recorderMode, cvdMode, marketMode);
     return JSON.stringify({
       tradingTf: targets.tradingKlineTf,
       tradingSymbols: targets.tradingSymbols,
@@ -1308,25 +1432,40 @@ export function createWsHub(app: FastifyInstance) {
       clusterMaxSqueezeRiskScore: 0,
       clusterSawLiquidityFloor: false,
       clusterSawDerivativesWeak: false,
+      hotRegimeActive: false,
+      hotRegimeEnteredAtMs: 0,
+      hotRegimeLastActiveAtMs: 0,
+      hotRegimeUntilMs: 0,
+      orderbookPromotedUntilMs: 0,
     };
     shortSignalGateBySymbol.set(symbol, next);
     return next;
   }
 
-  function buildShortCandidateSignature(snapshot: ReturnType<ShortExhaustionSignalEngine["evaluate"]>): string {
-    const reasons = [...snapshot.reasons].sort().join("|");
-    const suppressions = [...snapshot.suppressionReasons].sort().join("|");
-    return `${snapshot.summaryReason}::${reasons}::${suppressions}`;
-  }
+  function readCurrentSubscriptionTargets(
+    cfg: RuntimeConfig,
+    runtimeActive: boolean,
+    recorderMode: "off" | "record_only" | "record_while_running",
+    cvdMode: "off" | "record_only" | "record_while_running",
+    marketMode: "off" | "record_only" | "record_while_running",
+  ): SubscriptionTargets {
+    const targets = resolveSubscriptionTargets(cfg, runtimeActive, recorderMode, cvdMode, marketMode);
+    if (!isHotModeOrderbookStagingEnabled(cfg)) {
+      return targets;
+    }
 
-  function shouldSuppressRepeatedCandidateCluster(snapshot: ReturnType<ShortExhaustionSignalEngine["evaluate"]>, gate: ShortSignalGateState): boolean {
-    if (snapshot.state !== "CANDIDATE") return false;
-    if (!(gate.lastCandidateClusterAtMs > 0) || !gate.lastCandidateSignature) return false;
-    const elapsedMs = snapshot.ts - gate.lastCandidateClusterAtMs;
-    if (elapsedMs > SHORT_CANDIDATE_CLUSTER_WINDOW_MS) return false;
-    const signature = buildShortCandidateSignature(snapshot);
-    const scoreDelta = Number(snapshot.totalScore) - Number(gate.lastCandidateScore ?? 0);
-    return signature === gate.lastCandidateSignature && scoreDelta < SHORT_CANDIDATE_REPEAT_MIN_SCORE_DELTA;
+    const promotionExpiries = new Map<string, number>();
+    for (const symbol of targets.tradingSymbols) {
+      const promotedUntil = shortSignalGateBySymbol.get(symbol)?.orderbookPromotedUntilMs ?? 0;
+      if (promotedUntil > 0) {
+        promotionExpiries.set(symbol, promotedUntil);
+      }
+    }
+
+    return {
+      ...targets,
+      orderbookSymbols: resolveHotModeOrderbookSymbols(targets.tradingSymbols, promotionExpiries, nowMs()),
+    };
   }
 
   function resetShortCandidateCluster(gate: ShortSignalGateState) {
@@ -1403,6 +1542,29 @@ export function createWsHub(app: FastifyInstance) {
     gate.clusterSawLiquidityFloor ||= snapshot.reasons.includes("candidate:liquidity_floor");
     gate.clusterSawDerivativesWeak ||= snapshot.summaryReason === "derivatives_oi_1m_weak"
       || snapshot.suppressionReasons.some((value) => String(value ?? "").startsWith("derivatives_oi_"));
+  }
+
+  function refreshHotModeOrderbookPromotion(
+    snapshot: ReturnType<ShortExhaustionSignalEngine["evaluate"]>,
+    gate: ShortSignalGateState,
+    shortCfg: ShortExhaustionBotConfig,
+  ): boolean {
+    const now = snapshot.ts;
+    const wasPromoted = gate.orderbookPromotedUntilMs > now;
+
+    if (!isHotRegimeTrackingEnabled(shortCfg)) {
+      gate.orderbookPromotedUntilMs = 0;
+      return wasPromoted;
+    }
+
+    if (isHotModeOrderbookPromotedState(snapshot.state)) {
+      gate.orderbookPromotedUntilMs = Math.max(gate.orderbookPromotedUntilMs, now + HOT_MODE_ORDERBOOK_STICKY_MS);
+    } else if (gate.orderbookPromotedUntilMs <= now) {
+      gate.orderbookPromotedUntilMs = 0;
+    }
+
+    const isPromoted = gate.orderbookPromotedUntilMs > now;
+    return wasPromoted !== isPromoted;
   }
 
   function applyLiveShortAdvisoryClassifier(
@@ -1497,7 +1659,11 @@ export function createWsHub(app: FastifyInstance) {
     const stateChanged = snapshot.state !== prevState;
     const canLogState = now - gate.lastLogAtMs >= minLogIntervalMs;
     const transitionState = snapshot.state === "IDLE" && isShortActiveState(prevState) ? "EXPIRED" : snapshot.state;
-    const suppressRepeatedCandidate = shouldSuppressRepeatedCandidateCluster(snapshot, gate);
+    const suppressRepeatedCandidate = shouldSuppressRepeatedCandidateCluster(
+      snapshot,
+      gate,
+      isHotRegimeTrackingEnabled(shortCfg),
+    );
     const priceContext = buildShortSignalReferenceMarket({
       marketRow: cache.getRawRow(snapshot.symbol),
       orderbook: orderbooks.getSummary(snapshot.symbol),
@@ -1971,6 +2137,7 @@ export function createWsHub(app: FastifyInstance) {
         : null;
       const out: SymbolRowBase[] = [];
       const nextRowsBySymbol = new Map<string, SymbolRowBase>();
+      let orderbookScopeChanged = false;
 
       for (const symbol of symbols) {
       const cachedRow = canReuseBaseRows && !dirtySymbols.has(symbol)
@@ -2096,7 +2263,14 @@ export function createWsHub(app: FastifyInstance) {
         const orderbookSnapshot = shortBundle.orderbookSnapshot;
         const longShortRatioSnapshot = shortBundle.longShortRatioSnapshot;
         const gate = readShortSignalGate(symbol);
-        const snapshot = applyLiveShortAdvisoryClassifier(shortBundle.snapshot, gate);
+        const snapshot = applyHotRegimeTrackingSnapshot(
+          applyLiveShortAdvisoryClassifier(shortBundle.snapshot, gate),
+          gate,
+          activeShortCfg,
+        );
+        if (refreshHotModeOrderbookPromotion(snapshot, gate, activeShortCfg)) {
+          orderbookScopeChanged = true;
+        }
         const liveSetupPreview = buildLiveShortSetupPreview({
           symbol,
           snapshot,
@@ -2230,6 +2404,9 @@ export function createWsHub(app: FastifyInstance) {
         rowsBySymbol: nextRowsBySymbol,
       };
       clientRowDirtySymbols.clear();
+      if (orderbookScopeChanged) {
+        queueMicrotask(() => requestStreamLifecycleSync());
+      }
       rowsMeasure.end({ items: symbols.length });
       return out;
     } catch (error) {
@@ -2401,12 +2578,45 @@ export function createWsHub(app: FastifyInstance) {
     return [];
   }
 
-  function buildClientRowsCacheKey(detail: "full" | "preview" = "full"): string {
+  function computeShortSignalsRows(now: number, filters: ShortSignalRowsFilter): SymbolRow[] {
+    const baseRows = computeBaseRows(now);
+    const byKey = new Map<string, SymbolRow>();
+    const remember = (row: SymbolRow) => {
+      const key = `${row.symbol}:${String(row.updatedAt ?? 0)}`;
+      if (!byKey.has(key)) {
+        byKey.set(key, row);
+      }
+    };
+
+    const filteredRows = baseRows.filter((row) => shouldIncludeShortSignalRowByFilter(row, filters));
+
+    filteredRows
+      .filter(isActiveShortSignalRow)
+      .slice()
+      .sort((left, right) => Number(right.updatedAt ?? 0) - Number(left.updatedAt ?? 0))
+      .slice(0, 10)
+      .forEach((row) => remember(row as SymbolRow));
+
+    filteredRows
+      .filter((row) => Number.isFinite(Number(row.shortOiMove5mPct)))
+      .slice()
+      .sort((left, right) => (
+        Math.abs(Number(right.shortOiMove5mPct ?? 0)) - Math.abs(Number(left.shortOiMove5mPct ?? 0))
+      ) || left.symbol.localeCompare(right.symbol))
+      .slice(0, 10)
+      .forEach((row) => remember(row as SymbolRow));
+
+    return Array.from(byKey.values());
+  }
+
+  function buildClientRowsCacheKey(request: ClientRowsRequestState): string {
     const cfg = getEffectiveConfig();
     const st = runtime.getStatus();
-    const rowsMode = detail === "preview"
+    const rowsMode = request.detail === "preview"
       ? "preview_forced"
-      : rowsAllowed()
+      : request.detail === "signals"
+        ? "signals"
+        : rowsAllowed()
         ? (shouldServeLightweightClientRows() ? "rows_lightweight" : "rows")
         : "preview";
     return [
@@ -2416,11 +2626,12 @@ export function createWsHub(app: FastifyInstance) {
       streamsEnabled ? "streams" : "no_streams",
       bybitConnected ? "bybit" : "no_bybit",
       buildSymbolScopeKey(cfg),
+      JSON.stringify(request.shortSignalFilters),
     ].join("::");
   }
 
-  function computeRowsForClient(now: number, detail: "full" | "preview" = "full"): SymbolRow[] {
-    const cacheKey = buildClientRowsCacheKey(detail);
+  function computeRowsForClient(now: number, request: ClientRowsRequestState): SymbolRow[] {
+    const cacheKey = buildClientRowsCacheKey(request);
     if (
       clientRowsCache
       && clientRowsCache.key === cacheKey
@@ -2429,7 +2640,9 @@ export function createWsHub(app: FastifyInstance) {
       return clientRowsCache.rows;
     }
 
-    const rows = computeRowsForClientUncached(now, detail);
+    const rows = request.detail === "signals"
+      ? computeShortSignalsRows(now, request.shortSignalFilters)
+      : computeRowsForClientUncached(now, request.detail);
     clientRowsCache = {
       key: cacheKey,
       builtAtMs: now,
@@ -2439,7 +2652,10 @@ export function createWsHub(app: FastifyInstance) {
     return rows;
   }
 
-  shortSignalsRowsSnapshotProvider = () => computeRowsForClient(nowMs(), "full");
+  shortSignalsRowsSnapshotProvider = () => computeRowsForClient(
+    nowMs(),
+    createClientRowsRequestState({ detail: "full" }),
+  );
 
   function computeBotStats(rows: SymbolRow[]): BotStats {
     const base = runtime.getBotStats();
@@ -2509,10 +2725,13 @@ export function createWsHub(app: FastifyInstance) {
     });
   }
 
-  function sendRowsToClient(ws: WebSocket, mode: "tick" | "snapshot", detail?: "full" | "preview") {
+  function sendRowsToClient(ws: WebSocket, mode: "tick" | "snapshot", requestOverride?: Partial<ClientRowsRequestState>) {
     const now = nowMs();
-    const resolvedDetail = detail ?? clientRowsDetail.get(ws) ?? "preview";
-    const rows = computeRowsForClient(now, resolvedDetail);
+    const resolvedRequest = createClientRowsRequestState({
+      ...(clientRowsRequest.get(ws) ?? createClientRowsRequestState()),
+      ...(requestOverride ?? {}),
+    });
+    const rows = computeRowsForClient(now, resolvedRequest);
     const { rows: availableWsRows, symbols: availableWsSymbols } = buildAvailableWsSnapshot();
     const botStats = clientRowsCache?.rows === rows ? clientRowsCache.botStats : computeBotStats(rows);
 
@@ -2534,8 +2753,8 @@ export function createWsHub(app: FastifyInstance) {
     const st = runtime.getStatus();
     const { rows: availableWsRows, symbols: availableWsSymbols } = buildAvailableWsSnapshot();
     for (const c of clients) {
-      const detail = clientRowsDetail.get(c) ?? "preview";
-      const rows = computeRowsForClient(now, detail);
+      const request = clientRowsRequest.get(c) ?? createClientRowsRequestState();
+      const rows = computeRowsForClient(now, request);
       const botStats = clientRowsCache?.rows === rows ? clientRowsCache.botStats : computeBotStats(rows);
       safeSend(c, {
         type: "snapshot",
@@ -2577,8 +2796,25 @@ export function createWsHub(app: FastifyInstance) {
     const cfg = getEffectiveConfig();
     const st = runtime.getStatus();
     const { runtimeActive, recorderMode, cvdMode, marketMode, shouldEnableStreams } = readCurrentStreamRequirement();
-    const targets = resolveSubscriptionTargets(cfg, runtimeActive, recorderMode, cvdMode, marketMode);
+    const targets = readCurrentSubscriptionTargets(cfg, runtimeActive, recorderMode, cvdMode, marketMode);
     const nextSubscriptionKey = computeSubscriptionKey(runtimeActive, recorderMode, cvdMode, marketMode);
+    if (isHotModeOrderbookStagingEnabled(cfg)) {
+      const nextHotModeOrderbookScopeKey = JSON.stringify(targets.orderbookSymbols);
+      if (nextHotModeOrderbookScopeKey !== lastHotModeOrderbookScopeKey) {
+        app.log.info({
+          universeSize: targets.tradingSymbols.length,
+          orderbookSymbols: targets.orderbookSymbols.length,
+        }, "short hot-mode orderbook scope updated");
+        lastHotModeOrderbookScopeKey = nextHotModeOrderbookScopeKey;
+      }
+    } else {
+      if (lastHotModeOrderbookScopeKey) {
+        for (const gate of shortSignalGateBySymbol.values()) {
+          gate.orderbookPromotedUntilMs = 0;
+        }
+      }
+      lastHotModeOrderbookScopeKey = "";
+    }
 
     if (shouldEnableStreams) {
       streamsEnabled = true;
@@ -3248,12 +3484,12 @@ export function createWsHub(app: FastifyInstance) {
     wss.on("connection", (ws) => {
       clients.add(ws);
       clientEventsLimit.set(ws, 5);
-      clientRowsDetail.set(ws, "preview");
+      clientRowsRequest.set(ws, createClientRowsRequestState({ detail: "preview" }));
       syncLiveUpdateAggregator();
 
       const now = nowMs();
       const st = runtime.getStatus();
-      const rows = computeRowsForClient(now, "preview");
+      const rows = computeRowsForClient(now, createClientRowsRequestState({ detail: "preview" }));
       const botStats = clientRowsCache?.rows === rows ? clientRowsCache.botStats : computeBotStats(rows);
       const { rows: availableWsRows, symbols: availableWsSymbols } = buildAvailableWsSnapshot();
 
@@ -3280,9 +3516,12 @@ export function createWsHub(app: FastifyInstance) {
 
         if (msg.type === "rows_refresh_request") {
           const mode = msg.payload?.mode === "snapshot" ? "snapshot" : "tick";
-          const detail = msg.payload?.detail === "full" ? "full" : "preview";
-          clientRowsDetail.set(ws, detail);
-          sendRowsToClient(ws, mode, detail);
+          const request = createClientRowsRequestState({
+            ...(msg.payload?.detail ? { detail: msg.payload.detail } : {}),
+            ...(msg.payload?.shortSignalFilters ? { shortSignalFilters: msg.payload.shortSignalFilters } : {}),
+          });
+          clientRowsRequest.set(ws, request);
+          sendRowsToClient(ws, mode, request);
           return;
         }
 
@@ -3300,14 +3539,14 @@ export function createWsHub(app: FastifyInstance) {
       ws.on("close", () => {
         clients.delete(ws);
         clientEventsLimit.delete(ws);
-        clientRowsDetail.delete(ws);
+        clientRowsRequest.delete(ws);
         optimizerWsClients.delete(ws);
         syncLiveUpdateAggregator();
       });
       ws.on("error", () => {
         clients.delete(ws);
         clientEventsLimit.delete(ws);
-        clientRowsDetail.delete(ws);
+        clientRowsRequest.delete(ws);
         optimizerWsClients.delete(ws);
         syncLiveUpdateAggregator();
       });

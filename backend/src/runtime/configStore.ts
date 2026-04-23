@@ -4,6 +4,7 @@ import path from "node:path";
 import { z } from "zod";
 import { CONFIG } from "../config.js";
 import { FIXED_ENTRY_TIMEOUT_SEC, GLOBAL_REARM_CANDLE_MS } from "./rearmPolicy.js";
+import { filterTradableShortSymbols } from "./shortSymbolExclusions.js";
 import { DEFAULT_BOT_ID, getBotDefinition, type BotConfig } from "../bots/registry.js";
 
 const symbolSchema = z
@@ -50,6 +51,12 @@ const executionProfileSchema = z
       .strict(),
   })
   .strict();
+
+function sanitizeUniverseSymbols(symbols: unknown): string[] {
+  const filtered = filterTradableShortSymbols(Array.isArray(symbols) ? symbols : []);
+  if (filtered.length > 0) return filtered;
+  return filterTradableShortSymbols(Array.from(CONFIG.symbols));
+}
 
 const storedStateSchema = z
   .object({
@@ -238,7 +245,9 @@ function toStoredState(raw: any): StoredConfigState {
       : "default",
     universe: {
       selectedId: typeof legacyUniverse.selectedId === "string" ? legacyUniverse.selectedId : "",
-      symbols: Array.isArray(legacyUniverse.symbols) ? legacyUniverse.symbols : Array.from(CONFIG.symbols),
+      symbols: sanitizeUniverseSymbols(
+        Array.isArray(legacyUniverse.symbols) ? legacyUniverse.symbols : Array.from(CONFIG.symbols),
+      ),
     },
     botConfig: normalizedBot,
     executionProfile,
@@ -317,7 +326,7 @@ function defaultState(): StoredConfigState {
     selectedExecutionProfileId: "default",
     universe: {
       selectedId: "",
-      symbols: Array.from(CONFIG.symbols),
+      symbols: sanitizeUniverseSymbols(Array.from(CONFIG.symbols)),
     },
     botConfig: defaultBotConfig(DEFAULT_BOT_ID),
     executionProfile: defaultExecutionProfile(),
@@ -417,6 +426,7 @@ class ConfigStore extends EventEmitter {
     const includeLegacyExecutionInStrategy = false;
     const botChanged = nextBotId !== this.state.selectedBotId;
     const baseBotConfig = botChanged ? defaultBotConfig(nextBotId) : this.state.botConfig;
+    const baseBotConfigRecord = baseBotConfig as Record<string, unknown>;
     const hasSymbolOverridesPatch = Boolean(
       patchBotConfig && Object.prototype.hasOwnProperty.call(patchBotConfig, "symbolOverrides"),
     );
@@ -431,17 +441,32 @@ class ConfigStore extends EventEmitter {
       },
       ...(patch.botConfig && "dataSources" in patch.botConfig
         ? { dataSources: { ...((baseBotConfig as any).dataSources ?? {}), ...((patch.botConfig as any).dataSources ?? {}) } }
-        : {}),
+        : ("dataSources" in baseBotConfigRecord ? { dataSources: (baseBotConfigRecord as any).dataSources } : {})),
       signals: {
-        ...(("signals" in baseBotConfig ? (baseBotConfig as Record<string, unknown>).signals : {}) as Record<string, unknown>),
+        ...(("signals" in baseBotConfigRecord ? baseBotConfigRecord.signals : {}) as Record<string, unknown>),
         ...legacySignalsPatch,
         ...(patch.botConfig?.signals ?? {}),
       },
-      ...(patch.botConfig && "candidate" in patch.botConfig ? { candidate: { ...((baseBotConfig as any).candidate ?? {}), ...((patch.botConfig as any).candidate ?? {}) } } : {}),
-      ...(patch.botConfig && "derivatives" in patch.botConfig ? { derivatives: { ...((baseBotConfig as any).derivatives ?? {}), ...((patch.botConfig as any).derivatives ?? {}) } } : {}),
-      ...(patch.botConfig && "exhaustion" in patch.botConfig ? { exhaustion: { ...((baseBotConfig as any).exhaustion ?? {}), ...((patch.botConfig as any).exhaustion ?? {}) } } : {}),
-      ...(patch.botConfig && "microstructure" in patch.botConfig ? { microstructure: { ...((baseBotConfig as any).microstructure ?? {}), ...((patch.botConfig as any).microstructure ?? {}) } } : {}),
-      ...(patch.botConfig && "observe" in patch.botConfig ? { observe: { ...((baseBotConfig as any).observe ?? {}), ...((patch.botConfig as any).observe ?? {}) } } : {}),
+      candidate: {
+        ...((baseBotConfig as any).candidate ?? {}),
+        ...((patch.botConfig as any)?.candidate ?? {}),
+      },
+      derivatives: {
+        ...((baseBotConfig as any).derivatives ?? {}),
+        ...((patch.botConfig as any)?.derivatives ?? {}),
+      },
+      exhaustion: {
+        ...((baseBotConfig as any).exhaustion ?? {}),
+        ...((patch.botConfig as any)?.exhaustion ?? {}),
+      },
+      microstructure: {
+        ...((baseBotConfig as any).microstructure ?? {}),
+        ...((patch.botConfig as any)?.microstructure ?? {}),
+      },
+      observe: {
+        ...((baseBotConfig as any).observe ?? {}),
+        ...((patch.botConfig as any)?.observe ?? {}),
+      },
       strategy: {
         ...baseBotConfig.strategy,
         ...(patch.botConfig?.strategy ?? {}),
@@ -462,7 +487,7 @@ class ConfigStore extends EventEmitter {
       },
       ...(patch.botConfig && "runtime" in patch.botConfig
         ? { runtime: { ...((baseBotConfig as any).runtime ?? {}), ...((patch.botConfig as any).runtime ?? {}) } }
-        : {}),
+        : ("runtime" in baseBotConfigRecord ? { runtime: (baseBotConfigRecord as any).runtime } : {})),
       ...(hasSymbolOverridesPatch || nextSymbolOverrides != null
         ? { symbolOverrides: nextSymbolOverrides }
         : {}),
@@ -500,7 +525,9 @@ class ConfigStore extends EventEmitter {
       selectedExecutionProfileId: patch.selectedExecutionProfileId?.trim() || this.state.selectedExecutionProfileId,
       universe: {
         selectedId: universePatch.selectedId ?? this.state.universe.selectedId,
-        symbols: Array.isArray(universePatch.symbols) ? universePatch.symbols : this.state.universe.symbols,
+        symbols: sanitizeUniverseSymbols(
+          Array.isArray(universePatch.symbols) ? universePatch.symbols : this.state.universe.symbols,
+        ),
       },
       botConfig: nextBotConfig,
       executionProfile,
